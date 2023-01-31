@@ -4,7 +4,10 @@
 
 image:
   repository: everoute/release
-  #tag: ""
+  tag: "latest"
 
 bridgeName: cnibr0
-localGwIP: 100.64.254.254
+enableCNI: true
+CNIConf:
+  localGwIP: 100.64.254.254
+  enableProxy: true

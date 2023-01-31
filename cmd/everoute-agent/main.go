@@ -39,8 +39,7 @@ import (
 )
 
 var (
-	enableCNI   bool
-	metricsAddr string
+	opts *Options
 )
 
 func init() {
@@ -48,8 +47,11 @@ func init() {
 }
 
 func main() {
-	flag.BoolVar(&enableCNI, "enable-cni", false, "Enable CNI in agent.")
-	flag.StringVar(&metricsAddr, "metrics-addr", "0", "The address the metric endpoint binds to.")
+	// init opts
+	opts = NewOptions()
+
+	// parse cmd param
+	flag.StringVar(&opts.metricsAddr, "metrics-addr", "0", "The address the metric endpoint binds to.")
 	klog.InitFlags(nil)
 	flag.Parse()
 	defer klog.Flush()
@@ -58,11 +60,14 @@ func main() {
 	stopChan := ctrl.SetupSignalHandler()
 	ofPortIPAddrMoniotorChan := make(chan map[string]net.IP, 1024)
 
-	// TODO Update vds which is managed by everoute agent from datapathConfig.
-	datapathConfig, err := getDatapathConfig()
+	// complete options
+	err := opts.complete()
 	if err != nil {
-		klog.Fatalf("Failed to get datapath config. error: %v. ", err)
+		klog.Fatalf("Failed to complete options. error: %v. ", err)
 	}
+
+	// TODO Update vds which is managed by everoute agent from datapathConfig.
+	datapathConfig := opts.getDatapathConfig()
 	datapathManager := datapath.NewDatapathManager(datapathConfig, ofPortIPAddrMoniotorChan)
 	datapathManager.InitializeDatapath(stopChan)
 
@@ -70,7 +75,6 @@ func main() {
 	if err != nil {
 		klog.Fatalf("unable to create ovsdb monitor: %s", err.Error())
 	}
-
 	ovsdbMonitor.RegisterOvsdbEventHandler(monitor.OvsdbEventHandlerFuncs{
 		LocalEndpointAddFunc: func(endpoint *datapath.Endpoint) {
 			err := datapathManager.AddLocalEndpoint(endpoint)
@@ -93,6 +97,12 @@ func main() {
 	})
 	go ovsdbMonitor.Run(stopChan)
 
+	if err := datapath.ExcuteCommand("sudo %s", "conntrack -F"); err != nil {
+		klog.Error("Clean conntrack failed, err:", err)
+	} else {
+		klog.Info("Clean conntrack success.")
+	}
+
 	var mgr manager.Manager
 	config := ctrl.GetConfigOrDie()
 	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(constants.ControllerRuntimeQPS, constants.ControllerRuntimeBurst)
@@ -101,7 +111,7 @@ func main() {
 	err = wait.PollImmediateUntil(time.Second, func() (bool, error) {
 		mgr, err = ctrl.NewManager(config, ctrl.Options{
 			Scheme:             clientsetscheme.Scheme,
-			MetricsBindAddress: metricsAddr,
+			MetricsBindAddress: opts.metricsAddr,
 			Port:               9443,
 		})
 		if err != nil {
@@ -115,7 +125,7 @@ func main() {
 
 	k8sClient := mgr.GetClient()
 
-	if enableCNI {
+	if opts.IsEnableCNI() {
 		setAgentConf(datapathManager, mgr.GetAPIReader())
 		datapathManager.InitializeCNI()
 	}
@@ -127,7 +137,7 @@ func main() {
 	agentmonitor := monitor.NewAgentMonitor(k8sClient, ovsdbMonitor, ofPortIPAddrMoniotorChan)
 	go agentmonitor.Run(stopChan)
 
-	rpcServer := rpcserver.Initialize(datapathManager, k8sClient, enableCNI)
+	rpcServer := rpcserver.Initialize(datapathManager, k8sClient, opts.IsEnableCNI())
 	go rpcServer.Run(stopChan)
 
 	<-stopChan
@@ -144,7 +154,7 @@ func startManager(mgr manager.Manager, datapathManager *datapath.DpManager, stop
 		klog.Fatalf("unable to create policy controller: %s", err.Error())
 	}
 
-	if enableCNI {
+	if opts.IsEnableCNI() {
 		if err = (&proxy.NodeReconciler{
 			Client:          mgr.GetClient(),
 			Scheme:          mgr.GetScheme(),

@@ -17,13 +17,12 @@ limitations under the License.
 package cases
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -37,14 +36,16 @@ import (
 	securityv1alpha1 "github.com/everoute/everoute/pkg/apis/security/v1alpha1"
 	"github.com/everoute/everoute/pkg/constants"
 	"github.com/everoute/everoute/pkg/labels"
+	"github.com/everoute/everoute/tests/e2e/framework"
 	"github.com/everoute/everoute/tests/e2e/framework/matcher"
 	"github.com/everoute/everoute/tests/e2e/framework/model"
+	"github.com/everoute/everoute/tests/e2e/framework/node"
 )
 
 var _ = Describe("SecurityPolicy", func() {
 	AfterEach(func() {
 		Expect(e2eEnv.ResetResource(ctx)).Should(Succeed())
-		Expect(cleanConntrack()).Should(Succeed())
+		Expect(cleanConntrack(e2eEnv.NodeManager().ListAgent())).Should(Succeed())
 	})
 
 	// This case test policy with tcp and icmp can works. We setup three groups of vms (nginx/webserver/database), create
@@ -84,14 +85,161 @@ var _ = Describe("SecurityPolicy", func() {
 			addEngressRule(nginxPolicy, "TCP", serverPort, serverSelector)
 
 			Eventually(func() bool {
-				return checkConntrackExist("TCP", nginx.Status.GetIP(), db01.Status.GetIP(), 0, 0)
+				s, d, err := checkConntracksExist("TCP", nginx, db01, 0, 0)
+				Expect(err).Should(Succeed())
+				return s && d
 			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeTrue())
 
 			Expect(e2eEnv.SetupObjects(ctx, nginxPolicy)).Should(Succeed())
 
 			Eventually(func() bool {
-				return checkConntrackExist("TCP", nginx.Status.GetIP(), db01.Status.GetIP(), 0, 0)
+				s, d, err := checkConntracksExist("TCP", nginx, db01, 0, 0)
+				Expect(err).Should(Succeed())
+				return s || d
 			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+		})
+
+		It("should clean exist connection after adding drop policy without restarting", func() {
+			serviceRestarter.Stop()
+			defer serviceRestarter.RunAsync()
+
+			time.Sleep(1 * time.Second)
+
+			assertReachable([]*model.Endpoint{nginx}, []*model.Endpoint{db01}, "TCP", true)
+
+			nginxPolicy := newPolicy("nginx-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, nginxSelector)
+			addEngressRule(nginxPolicy, "TCP", serverPort, serverSelector)
+
+			Eventually(func() bool {
+				s, d, err := checkConntracksExist("TCP", nginx, db01, 0, 0)
+				Expect(err).Should(Succeed())
+				return s && d
+			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeTrue())
+
+			Expect(e2eEnv.SetupObjects(ctx, nginxPolicy)).Should(Succeed())
+
+			Eventually(func() bool {
+				s, d, err := checkConntracksExist("TCP", nginx, db01, 0, 0)
+				Expect(err).Should(Succeed())
+				return s || d
+			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+		})
+
+		When("limits tcp packets between components without restarting", func() {
+			var nginxPolicy, serverPolicy, dbPolicy *securityv1alpha1.SecurityPolicy
+
+			JustBeforeEach(func() {
+				serviceRestarter.Stop()
+				nginxPolicy = newPolicy("nginx-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, nginxSelector)
+				addIngressRule(nginxPolicy, "TCP", nginxPort) // allow all connection with nginx port
+				addEngressRule(nginxPolicy, "TCP", serverPort, serverSelector)
+
+				serverPolicy = newPolicy("server-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, serverSelector)
+				addIngressRule(serverPolicy, "TCP", serverPort, nginxSelector)
+				addEngressRule(serverPolicy, "TCP", dbPort, dbSelector)
+
+				dbPolicy = newPolicy("db-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, dbSelector)
+				addIngressRule(dbPolicy, "TCP", dbPort, dbSelector, serverSelector)
+				addEngressRule(dbPolicy, "TCP", dbPort, dbSelector)
+
+				Expect(e2eEnv.SetupObjects(ctx, nginxPolicy, serverPolicy, dbPolicy)).Should(Succeed())
+			})
+
+			JustAfterEach(func() {
+				serviceRestarter.RunAsync()
+			})
+
+			It("should clean exist allow connection after deleting policy", func() {
+				assertReachable([]*model.Endpoint{nginx}, []*model.Endpoint{server01}, "TCP", true)
+
+				Expect(e2eEnv.ResetResource(ctx)).Should(Succeed())
+
+				Eventually(func() bool {
+					s, d, err := checkConntracksExist("TCP", nginx, server01, 0, 0)
+					Expect(err).Should(Succeed())
+					return s || d
+				}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+			})
+
+		})
+
+		When("limits tcp packets between components", func() {
+			var nginxPolicy, serverPolicy, dbPolicy *securityv1alpha1.SecurityPolicy
+
+			JustBeforeEach(func() {
+				serviceRestarter.Stop()
+			})
+			JustAfterEach(func() {
+				serviceRestarter.RunAsync()
+			})
+
+			BeforeEach(func() {
+				nginxPolicy = newPolicy("nginx-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, nginxSelector)
+				addIngressRule(nginxPolicy, "TCP", nginxPort) // allow all connection with nginx port
+				addEngressRule(nginxPolicy, "TCP", serverPort, serverSelector)
+
+				serverPolicy = newPolicy("server-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, serverSelector)
+				addIngressRule(serverPolicy, "TCP", serverPort, nginxSelector)
+				addEngressRule(serverPolicy, "TCP", dbPort, dbSelector)
+
+				dbPolicy = newPolicy("db-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, dbSelector)
+				addIngressRule(dbPolicy, "TCP", dbPort, dbSelector, serverSelector)
+				addEngressRule(dbPolicy, "TCP", dbPort, dbSelector)
+
+				Expect(e2eEnv.SetupObjects(ctx, nginxPolicy, serverPolicy, dbPolicy)).Should(Succeed())
+			})
+
+			It("should clean exist allow connection after deleting policy", func() {
+				assertReachable([]*model.Endpoint{nginx}, []*model.Endpoint{server01}, "TCP", true)
+
+				Expect(e2eEnv.ResetResource(ctx)).Should(Succeed())
+
+				Eventually(func() bool {
+					s, d, err := checkConntracksExist("TCP", nginx, server01, 0, 0)
+					Expect(err).Should(Succeed())
+					return s || d
+				}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+			})
+
+		})
+
+		When("limits tcp packets between components without restarting", func() {
+			var nginxPolicy, serverPolicy, dbPolicy *securityv1alpha1.SecurityPolicy
+
+			JustBeforeEach(func() {
+				serviceRestarter.Stop()
+			})
+
+			JustAfterEach(func() {
+				serviceRestarter.RunAsync()
+			})
+
+			BeforeEach(func() {
+				nginxPolicy = newPolicy("nginx-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, nginxSelector)
+				addIngressRule(nginxPolicy, "TCP", nginxPort) // allow all connection with nginx port
+				addEngressRule(nginxPolicy, "TCP", serverPort, serverSelector)
+
+				serverPolicy = newPolicy("server-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, serverSelector)
+				addIngressRule(serverPolicy, "TCP", serverPort, nginxSelector)
+				addEngressRule(serverPolicy, "TCP", dbPort, dbSelector)
+
+				dbPolicy = newPolicy("db-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, dbSelector)
+				addIngressRule(dbPolicy, "TCP", dbPort, dbSelector, serverSelector)
+				addEngressRule(dbPolicy, "TCP", dbPort, dbSelector)
+
+				Expect(e2eEnv.SetupObjects(ctx, nginxPolicy, serverPolicy, dbPolicy)).Should(Succeed())
+			})
+			It("should clean exist allow connection after deleting policy", func() {
+				assertReachable([]*model.Endpoint{nginx}, []*model.Endpoint{server01}, "TCP", true)
+
+				Expect(e2eEnv.ResetResource(ctx)).Should(Succeed())
+
+				Eventually(func() bool {
+					s, d, err := checkConntracksExist("TCP", nginx, server01, 0, 0)
+					Expect(err).Should(Succeed())
+					return s || d
+				}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+			})
 		})
 
 		When("limits tcp packets between components", func() {
@@ -133,21 +281,10 @@ var _ = Describe("SecurityPolicy", func() {
 				Expect(e2eEnv.ResetResource(ctx)).Should(Succeed())
 
 				Eventually(func() bool {
-					return checkConntrackExist("TCP", nginx.Status.GetIP(), server01.Status.GetIP(), 0, 0)
+					s, d, err := checkConntracksExist("TCP", nginx, server01, 0, 0)
+					Expect(err).Should(Succeed())
+					return s || d
 				}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
-			})
-
-			It("should keep exist allow connection after adding new allow policy", func() {
-				assertReachable([]*model.Endpoint{nginx}, []*model.Endpoint{server01}, "TCP", true)
-
-				ngxinDBPolicy := newPolicy("nginx-db-policy", constants.Tier2, securityv1alpha1.DefaultRuleDrop, nginxSelector)
-				addEngressRule(ngxinDBPolicy, "TCP", dbPort, dbSelector)
-
-				Expect(e2eEnv.SetupObjects(ctx, ngxinDBPolicy)).Should(Succeed())
-
-				Eventually(func() bool {
-					return checkConntrackExist("TCP", nginx.Status.GetIP(), server01.Status.GetIP(), 0, 0)
-				}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeTrue())
 			})
 
 			When("add endpoint into the database group", func() {
@@ -733,6 +870,37 @@ var _ = Describe("GlobalPolicy", func() {
 			assertMatchReachTable("TCP", tcpPort, expectedTruthTable)
 		})
 
+		It("should clean exist allow connection add global drop policy without restarter", func() {
+			securityModel := &SecurityModel{
+				Endpoints: []*model.Endpoint{endpointA, endpointB, endpointC},
+			}
+			By("verify reachable between endpoints")
+			expectedTruthTable := securityModel.NewEmptyTruthTable(true)
+			assertMatchReachTable("TCP", tcpPort, expectedTruthTable)
+
+			serviceRestarter.Stop()
+			defer serviceRestarter.RunAsync()
+
+			Eventually(func() bool {
+				s, d, err := checkConntracksExist("TCP", endpointA, endpointB, 0, 0)
+				Expect(err).Should(Succeed())
+				return s && d
+			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeTrue())
+
+			healthyChan := checkConnectionHealth(endpointA, endpointB)
+			time.Sleep(2 * time.Second)
+
+			Expect(e2eEnv.GlobalPolicyProvider().SetDefaultAction(ctx, securityv1alpha1.GlobalDefaultActionDrop)).Should(Succeed())
+
+			Eventually(func() bool {
+				s, d, err := checkConntracksExist("TCP", endpointA, endpointB, 0, 0)
+				Expect(err).Should(Succeed())
+				return s || d
+			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+
+			Expect(<-healthyChan == UNHEALTHY).Should(BeTrue())
+		})
+
 		It("should clean exist allow connection add global drop policy", func() {
 			securityModel := &SecurityModel{
 				Endpoints: []*model.Endpoint{endpointA, endpointB, endpointC},
@@ -742,14 +910,23 @@ var _ = Describe("GlobalPolicy", func() {
 			assertMatchReachTable("TCP", tcpPort, expectedTruthTable)
 
 			Eventually(func() bool {
-				return checkConntrackExist("TCP", endpointA.Status.GetIP(), endpointB.Status.GetIP(), 0, 0)
+				s, d, err := checkConntracksExist("TCP", endpointA, endpointB, 0, 0)
+				Expect(err).Should(Succeed())
+				return s && d
 			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeTrue())
+
+			healthyChan := checkConnectionHealth(endpointA, endpointB)
+			time.Sleep(2 * time.Second)
 
 			Expect(e2eEnv.GlobalPolicyProvider().SetDefaultAction(ctx, securityv1alpha1.GlobalDefaultActionDrop)).Should(Succeed())
 
 			Eventually(func() bool {
-				return checkConntrackExist("TCP", endpointA.Status.GetIP(), endpointB.Status.GetIP(), 0, 0)
+				s, d, err := checkConntracksExist("TCP", endpointA, endpointB, 0, 0)
+				Expect(err).Should(Succeed())
+				return s || d
 			}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(BeFalse())
+
+			Expect(<-healthyChan == UNHEALTHY).Should(BeTrue())
 		})
 
 		When("update global default action to drop", func() {
@@ -867,40 +1044,61 @@ var _ = Describe("GlobalPolicy", func() {
 	})
 })
 
-func checkConntrackExist(proto, srcIP, dstIP string, srcPort, dstPort uint16) bool {
-	args := []string{"-L"}
+// Check whether conntrack from src to dst exists on the nodes where src and dst reside
+// Don't block your code before check conntracks.
+// The conntrack may be cleared after a TCP connection is closed.
+// So you should check it quickly.
+func checkConntracksExist(proto string, src, dst *model.Endpoint, srcPort, dstPort uint16) (bool, bool, error) {
 
-	if srcIP != "" {
-		args = append(args, "-s", srcIP)
-	}
-	if dstIP != "" {
-		args = append(args, "-d", dstIP)
-	}
-	args = append(args, "-p", proto)
-
-	if proto == "TCP" || proto == "UDP" {
-		if srcPort != 0 {
-			args = append(args, "--sport", strconv.Itoa(int(srcPort)))
+	if src.Status.Host == dst.Status.Host {
+		agent, err := e2eEnv.NodeManager().GetAgent(src.Status.Host)
+		if err != nil {
+			klog.Info("check conntracks exist from " + src.Name + " to " + dst.Name + " failed, error:" + err.Error() + ".")
+			return false, false, err
 		}
-		if dstPort != 0 {
-			args = append(args, "--dport", strconv.Itoa(int(dstPort)))
+		exist, err := agent.CheckConntrackExist(proto, src.Status.GetIP(), dst.Status.GetIP(), srcPort, dstPort)
+		klog.Info("check conntracks exist from " + src.Name + " to " + dst.Name + ", result:" + fmt.Sprintf("{s:%t, d:%t}", exist, exist) + ".")
+		return exist, exist, err
+	} else {
+		sAgent, err := e2eEnv.NodeManager().GetAgent(src.Status.Host)
+		if err != nil {
+			return false, false, err
 		}
+		dAgent, err := e2eEnv.NodeManager().GetAgent(dst.Status.Host)
+		if err != nil {
+			return false, false, err
+		}
+		var group sync.WaitGroup
+		errList := make([]error, 2)
+		group.Add(2)
+		var sExist, dExist bool
+		go func() {
+			sExist, errList[0] = sAgent.CheckConntrackExist(proto, src.Status.GetIP(), dst.Status.GetIP(), srcPort, dstPort)
+			group.Done()
+		}()
+		go func() {
+			dExist, errList[1] = dAgent.CheckConntrackExist(proto, src.Status.GetIP(), dst.Status.GetIP(), srcPort, dstPort)
+			group.Done()
+		}()
+		group.Wait()
+		klog.Info("check conntracks exist from " + src.Name + " to " + dst.Name + ", result:" + fmt.Sprintf("{s:%t, d:%t}", sExist, dExist) + ".")
+		return sExist, dExist, errors.NewAggregate(errList)
 	}
-
-	var b bytes.Buffer
-	cmd := exec.Command("conntrack", args...)
-	cmd.Stderr = &b
-	cmd.Run()
-	out := strings.TrimSpace(b.String())
-
-	reg, _ := regexp.Compile(": (.+?) flow entries")
-	flowCount, _ := strconv.Atoi(strings.TrimSpace(reg.FindStringSubmatch(out)[1]))
-	klog.Infof("checkConntrackExist find %d flows with %s", flowCount, args)
-	return flowCount != 0
 }
 
-func cleanConntrack() error {
-	return exec.Command("conntrack", "-F").Run()
+func cleanConntrack(agents []*node.Agent) error {
+	var group sync.WaitGroup
+	group.Add(len(agents))
+	errList := make([]error, len(agents))
+	for i, agent := range agents {
+		go func(index int, agent *node.Agent) {
+			errList[index] = agent.CleanConntrack()
+			klog.Info("Clean conntrack in " + agent.Name)
+			group.Done()
+		}(i, agent)
+	}
+	group.Wait()
+	return errors.NewAggregate(errList)
 }
 
 func newSelector(selector map[string][]string) *labels.Selector {
@@ -913,6 +1111,7 @@ func newPolicy(name, tier string, defaultRule securityv1alpha1.DefaultRuleType, 
 	policy := &securityv1alpha1.SecurityPolicy{}
 	policy.Name = name
 	policy.Namespace = e2eEnv.Namespace()
+	policy.Labels = map[string]string{framework.E2EPolicyLabelKey: framework.E2EPolicyLabelValue}
 	policy.Spec.Tier = tier
 	policy.Spec.DefaultRule = defaultRule
 	policy.Spec.PolicyTypes = []networkingv1.PolicyType{
@@ -1007,14 +1206,14 @@ func getPolicyPeer(policyPeers ...interface{}) []securityv1alpha1.SecurityPolicy
 }
 
 func assertFlowMatches(securityModel *SecurityModel) {
-	// todo: expectFlows should always not empty, check it first
-	expectFlows := securityModel.ExpectedFlows()
+	expectFlows := securityModel.ExpectedRelativeFlows()
+	Expect(expectFlows).ShouldNot(BeEmpty())
 
 	Eventually(func() map[string][]string {
 		allFlows, err := e2eEnv.NodeManager().DumpFlowAll()
 		Expect(err).Should(Succeed())
 		return allFlows
-	}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(matcher.ContainsFlow(expectFlows))
+	}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(matcher.ContainsRelativeFlow(expectFlows))
 }
 
 func assertReachable(sources []*model.Endpoint, destinations []*model.Endpoint, protocol string, expectReach bool) {
@@ -1054,4 +1253,51 @@ func assertMatchReachTable(protocol string, port int, expectedTruthTable *model.
 		Expect(err).Should(Succeed())
 		return tt
 	}, e2eEnv.Timeout(), e2eEnv.Interval()).Should(matcher.MatchTruthTable(expectedTruthTable, true))
+}
+
+type ConnHealth string
+
+const (
+	DISCONNECTED ConnHealth = "disconnected"
+	UNHEALTHY    ConnHealth = "unhealthy"
+	HEALTHY      ConnHealth = "healthy"
+	UNKNOWN      ConnHealth = "unknown"
+)
+
+const CheckConnectionHealthTime int = 20 // 20s
+
+func checkConnectionHealth(src, dst *model.Endpoint) <-chan ConnHealth {
+	resultChan := make(chan ConnHealth)
+	klog.Info("Check connection health from endpoint ", src.Name, " to endpoint ", dst.Name, ".")
+	go func(src, dst *model.Endpoint, resultChan chan ConnHealth) {
+		var command string = "ping"
+		var args []string = []string{"-W", "1", "-c", strconv.Itoa(CheckConnectionHealthTime / 1), "-q", strings.Split(dst.Status.IPAddr, "/")[0]}
+		rc, b, err := e2eEnv.EndpointManager().RunCommand(ctx, src.Name, command, args...)
+		fullOut := string(b)
+		if err != nil {
+			klog.Error("Error check connection health endpoint {", src.Name, ",", dst.Name, "}, return code:", rc, ", error:", err)
+			resultChan <- UNKNOWN
+			return
+		}
+		// Expect 4 lines at least:
+		// PING [dstIP] ([dstIP]): 56 data bytes
+		//
+		// --- [dstIP] ping statistics ---
+		// [time] packets transmitted, [n1] packets received, [n2]% packet loss
+		output := regexp.MustCompile("\r\n|\n|\r").Split(fullOut, -1)
+		infoOutput := output[3] // expect: [n0] packets transmitted, [n1] packets received, [n2]% packet loss
+		connInfo := regexp.MustCompile("[0-9]+").FindAllString(infoOutput, -1)
+		klog.Info("Total,Received,Loss Rate,Time:", connInfo)
+		lossRate, err := strconv.Atoi(connInfo[2])
+		if err != nil {
+			resultChan <- UNKNOWN
+		} else if lossRate == 0 {
+			resultChan <- HEALTHY
+		} else if lossRate == 100 {
+			resultChan <- DISCONNECTED
+		} else {
+			resultChan <- UNHEALTHY
+		}
+	}(src, dst, resultChan)
+	return resultChan
 }

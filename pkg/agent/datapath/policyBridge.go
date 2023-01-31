@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync"
-	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/contiv/libOpenflow/openflow13"
@@ -37,9 +35,7 @@ const (
 )
 
 type PolicyBridge struct {
-	name            string
-	OfSwitch        *ofctrl.OFSwitch
-	datapathManager *DpManager
+	BaseBridge
 
 	inputTable                     *ofctrl.Table
 	ctStateTable                   *ofctrl.Table
@@ -58,9 +54,6 @@ type PolicyBridge struct {
 	ctDropTable                    *ofctrl.Table
 	sfcPolicyTable                 *ofctrl.Table
 	policyForwardingTable          *ofctrl.Table
-
-	policySwitchStatusMutex sync.RWMutex
-	isPolicySwitchConnected bool
 }
 
 func NewPolicyBridge(brName string, datapathManager *DpManager) *PolicyBridge {
@@ -68,47 +61,6 @@ func NewPolicyBridge(brName string, datapathManager *DpManager) *PolicyBridge {
 	policyBridge.name = fmt.Sprintf("%s-policy", brName)
 	policyBridge.datapathManager = datapathManager
 	return policyBridge
-}
-
-func (p *PolicyBridge) SwitchConnected(sw *ofctrl.OFSwitch) {
-	log.Infof("Switch %s connected", p.name)
-
-	p.OfSwitch = sw
-
-	p.policySwitchStatusMutex.Lock()
-	p.isPolicySwitchConnected = true
-	p.policySwitchStatusMutex.Unlock()
-}
-
-func (p *PolicyBridge) SwitchDisconnected(sw *ofctrl.OFSwitch) {
-	log.Infof("Switch %s disconnected", p.name)
-
-	p.policySwitchStatusMutex.Lock()
-	p.isPolicySwitchConnected = false
-	p.policySwitchStatusMutex.Unlock()
-
-	p.OfSwitch = nil
-}
-
-func (p *PolicyBridge) IsSwitchConnected() bool {
-	p.policySwitchStatusMutex.Lock()
-	defer p.policySwitchStatusMutex.Unlock()
-
-	return p.isPolicySwitchConnected
-}
-
-func (p *PolicyBridge) WaitForSwitchConnection() {
-	for i := 0; i < 20; i++ {
-		time.Sleep(1 * time.Second)
-		p.policySwitchStatusMutex.Lock()
-		if p.isPolicySwitchConnected {
-			p.policySwitchStatusMutex.Unlock()
-			return
-		}
-		p.policySwitchStatusMutex.Unlock()
-	}
-
-	log.Fatalf("OVS switch %s Failed to connect", p.name)
 }
 
 func (p *PolicyBridge) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
@@ -254,9 +206,34 @@ func (p *PolicyBridge) initCTFlow(sw *ofctrl.OFSwitch) error {
 	}
 
 	// Table 70 conntrack commit table
+	// DONOT commit new tcp without syn flag, otherwise an +new+est CT flow
+	// will generate by conntrack module automatically. If happen to receive
+	// a reverse pkt, valid CT flow will be created, and drop rule does not work.
 	ctTrkState := openflow13.NewCTStates()
 	ctTrkState.SetNew()
 	ctTrkState.SetTrk()
+	zeroFlag := uint16(0)
+	tcpSynMask := uint16(0x2)
+	ctCommitFilterFlow, _ := p.ctCommitTable.NewFlow(ofctrl.FlowMatch{
+		Priority:  MID_MATCH_FLOW_PRIORITY + FLOW_MATCH_OFFSET,
+		Ethertype: PROTOCOL_IP,
+		IpProto:   ofctrl.IP_PROTO_TCP,
+		CtStates:  ctTrkState,
+		Regs: []*ofctrl.NXRegister{
+			{
+				RegID: constants.OVSReg4,
+				Data:  0x20,
+				Range: openflow13.NewNXRange(0, 15),
+			},
+		},
+		TcpFlags:     &zeroFlag,
+		TcpFlagsMask: &tcpSynMask,
+	})
+	if err := ctCommitFilterFlow.Next(sw.DropAction()); err != nil {
+		return fmt.Errorf("failed to install ct commit flow, error: %v", err)
+	}
+
+	// commit normal ip packet into ct
 	ctCommitFlow, _ := p.ctCommitTable.NewFlow(ofctrl.FlowMatch{
 		Priority:  MID_MATCH_FLOW_PRIORITY,
 		Ethertype: PROTOCOL_IP,
@@ -412,7 +389,7 @@ func (p *PolicyBridge) initPolicyForwardingTable(sw *ofctrl.OFSwitch) error {
 		return fmt.Errorf("failed to install from local output flow, error: %v", err)
 	}
 
-	fromUpstreamOuputFlow, _ := p.policyForwardingTable.NewFlow(ofctrl.FlowMatch{
+	fromUpstreamOutputFlow, _ := p.policyForwardingTable.NewFlow(ofctrl.FlowMatch{
 		Priority:  NORMAL_MATCH_FLOW_PRIORITY,
 		InputPort: uint32(p.datapathManager.BridgeChainPortMap[localBrName][PolicyToClsSuffix]),
 		Regs: []*ofctrl.NXRegister{
@@ -424,7 +401,7 @@ func (p *PolicyBridge) initPolicyForwardingTable(sw *ofctrl.OFSwitch) error {
 		},
 	})
 	outputPort, _ = sw.OutputPort(p.datapathManager.BridgeChainPortMap[localBrName][PolicyToLocalSuffix])
-	if err := fromUpstreamOuputFlow.Next(outputPort); err != nil {
+	if err := fromUpstreamOutputFlow.Next(outputPort); err != nil {
 		return fmt.Errorf("failed to install from upstream output flow, error: %v", err)
 	}
 

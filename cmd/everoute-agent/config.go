@@ -37,39 +37,60 @@ import (
 
 const agentConfigFilePath = "/var/lib/everoute/agentconfig.yaml"
 
+type Options struct {
+	Config *agentConfig
+
+	metricsAddr string
+}
+
+type CNIConf struct {
+	EnableProxy bool `yaml:"enableProxy,omitempty"`
+}
+
 type agentConfig struct {
 	DatapathConfig map[string]string `yaml:"datapathConfig"`
-	LocalGwIP      string            `yaml:"localGwIP,omitempty"`
 
 	// InternalIPs allow the items all ingress and egress traffics
 	InternalIPs []string `yaml:"internalIPs,omitempty"`
+
+	// cni config
+	EnableCNI bool    `yaml:"enableCNI,omitempty"`
+	CNIConf   CNIConf `yaml:"CNIConf,omitempty"`
 }
 
-func getAgentConfig() (*agentConfig, error) {
-	var err error
-	agentConfig := agentConfig{}
-
-	configdata, err := ioutil.ReadFile(agentConfigFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read agentConfig, error: %v. ", err)
+func NewOptions() *Options {
+	return &Options{
+		Config: &agentConfig{},
 	}
-
-	err = yaml.Unmarshal(configdata, &agentConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to Unmarshal agentConfig, error: %v. ", err)
-	}
-
-	return &agentConfig, nil
 }
 
-func getDatapathConfig() (*datapath.Config, error) {
+func (o *Options) IsEnableCNI() bool {
+	return o.Config.EnableCNI
+}
+
+func (o *Options) IsEnableProxy() bool {
+	if !o.Config.EnableCNI {
+		return false
+	}
+
+	return o.Config.CNIConf.EnableProxy
+}
+
+func (o *Options) complete() error {
 	agentConfig, err := getAgentConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get agentConfig, error: %v. ", err)
+		return fmt.Errorf("failed to get agentConfig, error: %v. ", err)
 	}
+	o.Config = agentConfig
+	return nil
+}
 
-	dpConfig := &datapath.Config{
+func (o *Options) getDatapathConfig() *datapath.DpManagerConfig {
+	agentConfig := o.Config
+
+	dpConfig := &datapath.DpManagerConfig{
 		InternalIPs: agentConfig.InternalIPs,
+		EnableCNI:   agentConfig.EnableCNI,
 	}
 
 	managedVDSMap := make(map[string]string)
@@ -78,15 +99,21 @@ func getDatapathConfig() (*datapath.Config, error) {
 	}
 	dpConfig.ManagedVDSMap = managedVDSMap
 
-	return dpConfig, nil
+	if dpConfig.EnableCNI {
+		cniConfig := &datapath.DpManagerCNIConfig{
+			EnableProxy: agentConfig.CNIConf.EnableProxy,
+		}
+		dpConfig.CNIConfig = cniConfig
+	}
+
+	return dpConfig
 }
 
 func setAgentConf(datapathManager *datapath.DpManager, k8sReader client.Reader) {
 	var err error
 
 	k8sClient := k8sReader.(client.Client)
-	agentInfo := datapathManager.AgentInfo
-	agentInfo.EnableCNI = true
+	agentInfo := datapathManager.Info
 	agentInfo.NodeName = os.Getenv(constants.AgentNodeNameENV)
 
 	node := corev1.Node{}
@@ -163,4 +190,21 @@ func setAgentConf(datapathManager *datapath.DpManager, k8sReader client.Reader) 
 	agentInfo.LocalGwMac = localGwMac
 	agentInfo.GatewayIP = ip.NextIP(agentInfo.PodCIDR[0].IP)
 	agentInfo.GatewayMac = GwMac
+}
+
+func getAgentConfig() (*agentConfig, error) {
+	var err error
+	agentConfig := agentConfig{}
+
+	configdata, err := ioutil.ReadFile(agentConfigFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agentConfig, error: %v. ", err)
+	}
+
+	err = yaml.Unmarshal(configdata, &agentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to Unmarshal agentConfig, error: %v. ", err)
+	}
+
+	return &agentConfig, nil
 }
