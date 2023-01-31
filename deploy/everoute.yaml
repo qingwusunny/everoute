@@ -105,8 +105,9 @@ spec:
                               tag:
                                 format: int32
                                 type: integer
-                              trunk:
-                                type: string
+                              trunks:
+                                format: int32
+                                type: integer
                               vlanMode:
                                 type: string
                             type: object
@@ -1870,10 +1871,7 @@ data:
   agentconfig.yaml: |
     datapathConfig:
       cnibr0: cnibr0
-    enableCNI: true
-    CNIConf:
-      localGwIP: 100.64.254.254
-      enableProxy: true
+    localGwIP: 100.64.254.254
   cni-conf.conflist: |
     {
         "cniVersion": "0.3.0",
@@ -2122,7 +2120,7 @@ spec:
       containers:
         - name: init-agent
           command: ["init_agent"]
-          image: everoute/release:latest
+          image: everoute/release:1.0.6-rc-20220926-01
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: true
@@ -2161,10 +2159,11 @@ spec:
             successThreshold: 1
             failureThreshold: 3
         - name: everoute-agent
-          image: everoute/release:latest
+          image: everoute/release:1.0.6-rc-20220926-01
           imagePullPolicy: IfNotPresent
           command: ["start-everoute-agent"]
           args:
+            - --enable-cni=true
             - -v=0
             - --metrics-addr=127.0.0.1:30002
           env:
@@ -2284,7 +2283,7 @@ spec:
       serviceAccountName: everoute-controller
       containers:
         - name: everoute-controller
-          image: everoute/release:latest
+          image: everoute/release:1.0.6-rc-20220926-01
           imagePullPolicy: IfNotPresent
           command: ["everoute-controller"]
           args:

@@ -18,7 +18,6 @@ package node
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
@@ -62,7 +61,7 @@ const (
 	RoleAgent      = "agent"
 )
 
-// GetClient return client connect to this node, must not close the returned client.
+// GetClient return client connect to this node, must not close the returnd client.
 func (n *Node) GetClient() (*ssh.Client, error) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
@@ -329,7 +328,7 @@ func (m *Manager) ListController() []*Controller {
 
 // ServiceRestarter random restart controller and agent when e2e
 // Deprecated, we should use external chaos engineering tools to replace restarter
-func (m *Manager) ServiceRestarter(minInterval, upwardFloatInterval int) *ServiceRestarter {
+func (m *Manager) ServiceRestarter(minInterval, maxInterval int) *ServiceRestarter {
 	var serviceList []Service
 
 	if !m.disableAgentRestarter {
@@ -345,10 +344,9 @@ func (m *Manager) ServiceRestarter(minInterval, upwardFloatInterval int) *Servic
 	}
 
 	return &ServiceRestarter{
-		minInterval:         minInterval,
-		upwardFloatInterval: upwardFloatInterval,
-		serviceList:         serviceList,
-		stopSig:             make(chan struct{}),
+		minInterval: minInterval,
+		maxInterval: maxInterval,
+		serviceList: serviceList,
 	}
 }
 
@@ -361,33 +359,15 @@ type Service interface {
 
 // ServiceRestarter control automatically restart part of services after every random interval.
 type ServiceRestarter struct {
-	minInterval         int
-	upwardFloatInterval int
-	serviceList         []Service
-	stopSig             chan struct{}
+	minInterval int
+	maxInterval int
+	serviceList []Service
 }
 
-// Run it in another goroutine
-func (c *ServiceRestarter) RunAsync() {
-	go c.Run()
-}
-
-func (c *ServiceRestarter) Run() {
-	klog.Info("Service Restarter run!")
-	ctx := context.Background()
-	firstTime := true
-	getMinInterval := func() int {
-		if firstTime {
-			firstTime = false
-			return 0
-		}
-		return c.minInterval
-	}
-
+func (c *ServiceRestarter) Run(stopCh <-chan struct{}) {
 	for {
-		minInterval := getMinInterval()
 		select {
-		case <-time.After(time.Duration(rand.IntnRange(minInterval, minInterval+c.upwardFloatInterval)) * time.Second):
+		case <-time.After(time.Duration(rand.IntnRange(c.minInterval, c.maxInterval)) * time.Second):
 			for _, service := range c.serviceList {
 				if rand.Intn(2) == 0 {
 					continue
@@ -399,16 +379,8 @@ func (c *ServiceRestarter) Run() {
 					klog.Fatalf("failed to restart service %s: %s, log\n: %s", service.GetName(), err, string(log))
 				}
 			}
-		case <-ctx.Done():
-			return
-		case <-c.stopSig:
+		case <-stopCh:
 			return
 		}
 	}
-}
-
-// stop a living restarter and block here util the restarter is closed
-func (c *ServiceRestarter) Stop() {
-	klog.Info("Service Restarter Stop!")
-	c.stopSig <- struct{}{}
 }

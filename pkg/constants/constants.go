@@ -60,7 +60,6 @@ const (
 
 const (
 	OVSReg0 = 0
-	OVSReg3 = 3
 	OVSReg4 = 4
 	OVSReg6 = 6
 )

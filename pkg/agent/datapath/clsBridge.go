@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/contiv/libOpenflow/openflow13"
@@ -42,11 +44,16 @@ const (
 )
 
 type ClsBridge struct {
-	BaseBridge
+	name            string
+	OfSwitch        *ofctrl.OFSwitch
+	datapathManager *DpManager
 
 	clsBridgeLearningTable   *ofctrl.Table
 	clsBridgeForwardingTable *ofctrl.Table
 	clsBridgeOutputTable     *ofctrl.Table
+
+	clsSwitchStatusMutex sync.RWMutex
+	isClsSwitchConnected bool
 }
 
 func NewClsBridge(brName string, datapathManager *DpManager) *ClsBridge {
@@ -55,6 +62,47 @@ func NewClsBridge(brName string, datapathManager *DpManager) *ClsBridge {
 	clsBridge.datapathManager = datapathManager
 
 	return clsBridge
+}
+
+func (c *ClsBridge) SwitchConnected(sw *ofctrl.OFSwitch) {
+	log.Infof("Switch %s connected", c.name)
+
+	c.OfSwitch = sw
+
+	c.clsSwitchStatusMutex.Lock()
+	c.isClsSwitchConnected = true
+	c.clsSwitchStatusMutex.Unlock()
+}
+
+func (c *ClsBridge) SwitchDisconnected(sw *ofctrl.OFSwitch) {
+	log.Infof("Switch %s disconnected", c.name)
+
+	c.clsSwitchStatusMutex.Lock()
+	c.isClsSwitchConnected = false
+	c.clsSwitchStatusMutex.Unlock()
+
+	c.OfSwitch = nil
+}
+
+func (c *ClsBridge) IsSwitchConnected() bool {
+	c.clsSwitchStatusMutex.Lock()
+	defer c.clsSwitchStatusMutex.Unlock()
+
+	return c.isClsSwitchConnected
+}
+
+func (c *ClsBridge) WaitForSwitchConnection() {
+	for i := 0; i < 20; i++ {
+		time.Sleep(1 * time.Second)
+		c.clsSwitchStatusMutex.Lock()
+		if c.isClsSwitchConnected {
+			c.clsSwitchStatusMutex.Unlock()
+			return
+		}
+		c.clsSwitchStatusMutex.Unlock()
+	}
+
+	log.Fatalf("OVS switch %s Failed to connect", c.name)
 }
 
 func (c *ClsBridge) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
@@ -80,7 +128,7 @@ func (c *ClsBridge) InitVlanMacLearningAction(learnAction *ofctrl.LearnAction, l
 		Name:  "nxm_of_eth_src",
 		Start: 0,
 	}
-	err := learnAction.AddLearnedMatch(learnDstMatchField1, 12, learnSrcMatchField1, nil)
+	err := learnAction.AddLearnedMatch(learnDstMatchField1, 16, learnSrcMatchField1, nil)
 	if err != nil {
 		return fmt.Errorf("failed to initialize learn action, AddLearnedMatch nxm_of_vlan_tci failure, error: %v", err)
 	}
@@ -185,7 +233,7 @@ func (c *ClsBridge) initForwardingTable() error {
 	return nil
 }
 
-func (c *ClsBridge) initOutputTable(sw *ofctrl.OFSwitch) error {
+func (c *ClsBridge) initOuputTable(sw *ofctrl.OFSwitch) error {
 	localBrName := strings.TrimSuffix(c.name, "-cls")
 	// clsBridgeOutputTable floodingOutputFlow
 	floodingOutputFlow, _ := c.clsBridgeOutputTable.NewFlow(ofctrl.FlowMatch{
@@ -223,8 +271,8 @@ func (c *ClsBridge) initOutputTable(sw *ofctrl.OFSwitch) error {
 		return fmt.Errorf("failed to install cls bridge learnedLocalToLocalOutputFlow, error: %v", err)
 	}
 
-	// clsBridgeOutputTable learnedLocalToRemoteOutputFlow
-	learnedLocalToRemoteOutputFlow, _ := c.clsBridgeOutputTable.NewFlow(ofctrl.FlowMatch{
+	// clsBridgeOutputTable learnedLocalToRemoteOuputFlow
+	learnedLocalToRemoteOuputFlow, _ := c.clsBridgeOutputTable.NewFlow(ofctrl.FlowMatch{
 		Priority: NORMAL_MATCH_FLOW_PRIORITY,
 		Regs: []*ofctrl.NXRegister{
 			{
@@ -235,8 +283,8 @@ func (c *ClsBridge) initOutputTable(sw *ofctrl.OFSwitch) error {
 		},
 	})
 	outputPort, _ = sw.OutputPort(c.datapathManager.BridgeChainPortMap[localBrName][ClsToUplinkSuffix])
-	if err := learnedLocalToRemoteOutputFlow.Next(outputPort); err != nil {
-		return fmt.Errorf("failed to install cls bridge learnedLocalToRemoteOutputFlow, error: %v", err)
+	if err := learnedLocalToRemoteOuputFlow.Next(outputPort); err != nil {
+		return fmt.Errorf("failed to install cls bridge learnedLocalToRemoteOuputFlow, error: %v", err)
 	}
 
 	// clsBridgeOutputTable default flow
@@ -263,7 +311,7 @@ func (c *ClsBridge) BridgeInit() {
 	if err := c.initForwardingTable(); err != nil {
 		log.Fatalf("Failed to init cls bridge forwarding table, error: %v", err)
 	}
-	if err := c.initOutputTable(sw); err != nil {
+	if err := c.initOuputTable(sw); err != nil {
 		log.Fatalf("Failed to init cls bridge output table, error: %v", err)
 	}
 }
@@ -307,7 +355,7 @@ func (c *ClsBridge) BridgeInitCNI() {
 	hairpinFlow, _ := c.clsBridgeLearningTable.NewFlow(ofctrl.FlowMatch{
 		Priority:  HIGH_MATCH_FLOW_PRIORITY,
 		Ethertype: PROTOCOL_IP,
-		IpDa:      &c.datapathManager.Info.LocalGwIP,
+		IpDa:      &c.datapathManager.AgentInfo.LocalGwIP,
 	})
 	outputPort, _ := c.OfSwitch.OutputPort(uint32(openflow13.P_IN_PORT))
 	if err := hairpinFlow.Next(outputPort); err != nil {

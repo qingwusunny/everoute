@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 
 	rthttp "github.com/hashicorp/go-retryablehttp"
@@ -399,10 +398,6 @@ func (m *provider) mutationQueryVlan(ctx context.Context, vlanID int) (string, e
 	var vlanUUID string
 	if towerVlans, err := queryVlans(m.towerClient); err == nil {
 		for _, vlan := range towerVlans {
-			if !strings.Contains(vlan.LocalID, "_") || vlan.Type != NetworkTypeVM {
-				// filter out invalid vlan
-				continue
-			}
 			if vlan.Vds.ID == m.vdsID && vlan.VlanID == vlanID {
 				vlanUUID = vlan.ID
 				break
@@ -413,7 +408,7 @@ func (m *provider) mutationQueryVlan(ctx context.Context, vlanID int) (string, e
 	}
 
 	if vlanUUID == "" {
-		vlan, err := adaptMutationCreateVlan(m.towerClient, &VlanCreateInput{
+		vlan, err := mutationCreateVlan(m.towerClient, &VlanCreateInput{
 			Name:   fmt.Sprintf("vlan%d", vlanID),
 			Type:   NetworkTypeVM,
 			Vds:    &ConnectInput{Connect: &UniqueInput{ID: &m.vdsID}},
@@ -496,9 +491,6 @@ func (m *provider) setupIPAddrPorts(ctx context.Context, endpoint *model.Endpoin
 		udpPort=${2}
 		tcpPort=${3}
 		vethName=eth0
-
-		ip link set lo up
-		ip link set ${vethName} up
 
 		realIP=$(ip addr show ${vethName} | grep -Eo '([0-9]*\.){3}[0-9]*/[0-9]*' || true)
 		if [[ "${realIP}" != "${ipAddr}" ]]; then

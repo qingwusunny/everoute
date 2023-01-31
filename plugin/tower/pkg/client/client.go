@@ -340,19 +340,11 @@ func (c *Client) dialer() *websocket.Dialer {
 	return c.Dialer
 }
 
-// we reuse the insecureClient to reuse the underlay tcp connection
-var insecureClient = func() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402
-	return &http.Client{Transport: transport}
-}()
-
 func (c *Client) httpClient() *http.Client {
 	if c.HTTPClient == nil {
-		if c.AllowInsecure {
-			return insecureClient
-		}
-		return http.DefaultClient
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: c.AllowInsecure} // #nosec G402
+		return &http.Client{Transport: transport}
 	}
 	return c.HTTPClient
 }

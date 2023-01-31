@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	timeout   = time.Second * 8
+	timeout   = time.Second * 60
 	interval  = time.Millisecond * 250
 	emptyUUID = "00000000-0000-0000-0000-000000000000"
 )
@@ -47,16 +47,7 @@ type Iface struct {
 	IfaceName  string
 	IfaceType  string
 	OfPort     uint32
-	VlanID     uint16
-	Trunk      string
 	externalID map[string]string
-}
-
-type Ep struct {
-	MacAddrStr string
-	OfPort     uint32
-	VlanID     uint16
-	Trunk      string
 }
 
 var (
@@ -66,7 +57,7 @@ var (
 	ovsdbMonitor               *OVSDBMonitor
 	monitor                    *AgentMonitor
 	localEndpointLock          sync.RWMutex
-	localEndpointMap           = make(map[uint32]Ep)
+	localEndpointMap           = make(map[uint32]net.HardwareAddr)
 	stopChan                   = make(chan struct{})
 	ofPortIPAddressMonitorChan = make(chan map[string]net.IP, 1024)
 )
@@ -93,11 +84,7 @@ func TestMain(m *testing.M) {
 			localEndpointLock.Lock()
 			defer localEndpointLock.Unlock()
 
-			localEndpointMap[endpoint.PortNo] = Ep{
-				MacAddrStr: endpoint.MacAddrStr,
-				VlanID:     endpoint.VlanID,
-				Trunk:      endpoint.Trunk,
-			}
+			localEndpointMap[endpoint.PortNo], _ = net.ParseMAC(endpoint.MacAddrStr)
 		},
 		LocalEndpointDeleteFunc: func(endpoint *datapath.Endpoint) {
 			localEndpointLock.Lock()
@@ -110,11 +97,7 @@ func TestMain(m *testing.M) {
 			defer localEndpointLock.Unlock()
 
 			delete(localEndpointMap, oldEndpoint.PortNo)
-			localEndpointMap[newEndpoint.PortNo] = Ep{
-				MacAddrStr: newEndpoint.MacAddrStr,
-				VlanID:     newEndpoint.VlanID,
-				Trunk:      newEndpoint.Trunk,
-			}
+			localEndpointMap[newEndpoint.PortNo], _ = net.ParseMAC(newEndpoint.MacAddrStr)
 		},
 	})
 
@@ -246,9 +229,6 @@ func createPort(client *ovsdb.OvsdbClient, brName, portName string, iface *Iface
 			"interfaces": ovsdb.UUID{GoUuid: "ifacedummy"},
 		},
 	}
-	if iface != nil {
-		portOperation.Row["tag"] = iface.VlanID
-	}
 
 	mutateOperation := ovsdb.Operation{
 		Op:        "mutate",
@@ -258,48 +238,6 @@ func createPort(client *ovsdb.OvsdbClient, brName, portName string, iface *Iface
 	}
 
 	_, err := ovsdbTransact(client, "Open_vSwitch", ifaceOperation, portOperation, mutateOperation)
-	return err
-}
-
-func updatePortToTrunk(client *ovsdb.OvsdbClient, portName string, trunk []int, tag uint16) error {
-	var portOperations []ovsdb.Operation
-	portOperations = append(portOperations, ovsdb.Operation{
-		Op:        "mutate",
-		Table:     "Port",
-		Mutations: []interface{}{[]interface{}{"tag", "delete", tag}},
-		Where:     []interface{}{[]interface{}{"name", "==", portName}},
-	})
-
-	mutateSet, _ := ovsdb.NewOvsSet(trunk)
-	portOperations = append(portOperations, ovsdb.Operation{
-		Op:        "mutate",
-		Table:     "Port",
-		Mutations: []interface{}{[]interface{}{"trunks", "insert", mutateSet}},
-		Where:     []interface{}{[]interface{}{"name", "==", portName}},
-	})
-
-	_, err := ovsdbTransact(client, "Open_vSwitch", portOperations...)
-	return err
-}
-
-func updatePortToAccess(client *ovsdb.OvsdbClient, portName string, trunk []int, tag uint16) error {
-	var portOperations []ovsdb.Operation
-	mutateSet, _ := ovsdb.NewOvsSet(trunk)
-	portOperations = append(portOperations, ovsdb.Operation{
-		Op:        "mutate",
-		Table:     "Port",
-		Mutations: []interface{}{[]interface{}{"trunks", "delete", mutateSet}},
-		Where:     []interface{}{[]interface{}{"name", "==", portName}},
-	})
-
-	portOperations = append(portOperations, ovsdb.Operation{
-		Op:        "mutate",
-		Table:     "Port",
-		Mutations: []interface{}{[]interface{}{"tag", "insert", tag}},
-		Where:     []interface{}{[]interface{}{"name", "==", portName}},
-	})
-
-	_, err := ovsdbTransact(client, "Open_vSwitch", portOperations...)
 	return err
 }
 

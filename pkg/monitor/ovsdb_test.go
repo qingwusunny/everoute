@@ -35,16 +35,7 @@ func TestOvsDbEventHandler(t *testing.T) {
 		IfaceName:  ep1PortName,
 		IfaceType:  "internal",
 		OfPort:     uint32(11),
-		VlanID:     uint16(1),
 		externalID: ep1InterfaceExternalIds,
-	}
-	ep1 := Ep{
-		MacAddrStr: ep1MacAddrStr,
-		VlanID:     uint16(1),
-	}
-	newep1 := Ep{
-		MacAddrStr: ep1MacAddrStr,
-		Trunk:      "1,2",
 	}
 
 	t.Logf("create new bridge %s", bridgeName)
@@ -56,30 +47,10 @@ func TestOvsDbEventHandler(t *testing.T) {
 	t.Run("Add local endpoint ep1", func(t *testing.T) {
 		Eventually(func() string {
 			localEndpointLock.Lock()
-			endpointMac := localEndpointMap[ep1Iface.OfPort].MacAddrStr
+			endpointMac := localEndpointMap[ep1Iface.OfPort].String()
 			localEndpointLock.Unlock()
 			return endpointMac
 		}, timeout, interval).Should(Equal(ep1MacAddrStr))
-	})
-
-	Expect(updatePortToTrunk(ovsClient, ep1PortName, []int{1, 2}, uint16(1))).Should(Succeed())
-	t.Run("Update local endpoint ep1, access port to trunk port", func(t *testing.T) {
-		Eventually(func() string {
-			localEndpointLock.Lock()
-			trunks := localEndpointMap[ep1Iface.OfPort].Trunk
-			localEndpointLock.Unlock()
-			return trunks
-		}, timeout, interval).Should(Equal(newep1.Trunk))
-	})
-
-	Expect(updatePortToAccess(ovsClient, ep1PortName, []int{1, 2}, uint16(1))).Should(Succeed())
-	t.Run("Update local endpoint ep1, trunk port to access port", func(t *testing.T) {
-		Eventually(func() uint16 {
-			localEndpointLock.Lock()
-			vlan := localEndpointMap[ep1Iface.OfPort].VlanID
-			localEndpointLock.Unlock()
-			return vlan
-		}, timeout, interval).Should(Equal(ep1.VlanID))
 	})
 
 	// Delete local endpoint
@@ -117,7 +88,7 @@ func TestOvsDbEventHandler(t *testing.T) {
 			}
 			localEndpointLock.Lock()
 			defer localEndpointLock.Unlock()
-			return localEndpointMap[uint32(iface.Ofport)].MacAddrStr == iface.Mac
+			return localEndpointMap[uint32(iface.Ofport)].String() == iface.Mac
 		}, timeout, interval).Should(Equal(true))
 	})
 
@@ -150,7 +121,7 @@ func TestOvsDbEventHandler(t *testing.T) {
 			}
 			localEndpointLock.Lock()
 			defer localEndpointLock.Unlock()
-			return localEndpointMap[internalIface.OfPort].MacAddrStr == iface.Mac
+			return localEndpointMap[internalIface.OfPort].String() == iface.Mac
 		}, timeout, interval).Should(BeTrue())
 	})
 

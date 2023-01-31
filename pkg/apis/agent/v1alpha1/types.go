@@ -72,7 +72,7 @@ const (
 type VlanConfig struct {
 	VlanMode VlanMode `json:"vlanMode,omitempty"`
 	Tag      int32    `json:"tag,omitempty"`
-	Trunk    string   `json:"trunk,omitempty"`
+	Trunks   int32    `json:"trunks,omitempty"`
 }
 
 type BondMode string

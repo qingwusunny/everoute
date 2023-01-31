@@ -36,14 +36,12 @@ func (c *Collector) ArpStream(req *emptypb.Empty, srv v1alpha1.Collector_ArpStre
 	for {
 		select {
 		case arp := <-c.dpManager.ArpChan:
-			b, err := arp.Pkt.MarshalBinary()
+			b, err := arp.MarshalBinary()
 			if err != nil {
 				continue
 			}
 			resp := v1alpha1.ArpResponse{
-				Pkt:    b,
-				InPort: arp.InPort,
-				BrName: arp.BrName,
+				Pkt: b,
 			}
 			if err := srv.Send(&resp); err != nil {
 				klog.Infof("send error %v", err)

@@ -28,8 +28,6 @@ import (
 	"github.com/contiv/libOpenflow/openflow13"
 	"github.com/contiv/libOpenflow/protocol"
 	"github.com/contiv/ofnet/ofctrl"
-
-	"github.com/everoute/everoute/pkg/constants"
 )
 
 //nolint
@@ -48,7 +46,9 @@ const (
 )
 
 type LocalBridge struct {
-	BaseBridge
+	name            string
+	OfSwitch        *ofctrl.OFSwitch
+	datapathManager *DpManager
 
 	vlanInputTable                 *ofctrl.Table // Table 0
 	localEndpointL2ForwardingTable *ofctrl.Table // Table 5
@@ -65,6 +65,9 @@ type LocalBridge struct {
 	localToLocalBUMFlow      map[uint32]*ofctrl.Flow
 	learnedIPAddressMapMutex sync.RWMutex
 	learnedIPAddressMap      map[string]IPAddressReference
+
+	localSwitchStatusMuxtex sync.RWMutex
+	isLocalSwitchConnected  bool
 }
 
 type IPAddressReference struct {
@@ -83,6 +86,48 @@ func NewLocalBridge(brName string, datapathManager *DpManager) *LocalBridge {
 	return localBridge
 }
 
+// Controller interface
+func (l *LocalBridge) SwitchConnected(sw *ofctrl.OFSwitch) {
+	log.Infof("Switch %s connected", l.name)
+
+	l.OfSwitch = sw
+
+	l.localSwitchStatusMuxtex.Lock()
+	l.isLocalSwitchConnected = true
+	l.localSwitchStatusMuxtex.Unlock()
+}
+
+func (l *LocalBridge) SwitchDisconnected(sw *ofctrl.OFSwitch) {
+	log.Infof("Switch %s disconnected", l.name)
+
+	l.localSwitchStatusMuxtex.Lock()
+	l.isLocalSwitchConnected = false
+	l.localSwitchStatusMuxtex.Unlock()
+
+	l.OfSwitch = nil
+}
+
+func (l *LocalBridge) IsSwitchConnected() bool {
+	l.localSwitchStatusMuxtex.Lock()
+	defer l.localSwitchStatusMuxtex.Unlock()
+
+	return l.isLocalSwitchConnected
+}
+
+func (l *LocalBridge) WaitForSwitchConnection() {
+	for i := 0; i < 20; i++ {
+		time.Sleep(1 * time.Second)
+		l.localSwitchStatusMuxtex.Lock()
+		if l.isLocalSwitchConnected {
+			l.localSwitchStatusMuxtex.Unlock()
+			return
+		}
+		l.localSwitchStatusMuxtex.Unlock()
+	}
+
+	log.Fatalf("OVS switch %s Failed to connect", l.name)
+}
+
 func (l *LocalBridge) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
 	switch pkt.Data.Ethertype {
 	case PROTOCOL_ARP:
@@ -99,7 +144,6 @@ func (l *LocalBridge) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
 				log.Errorf("error inport filed")
 			}
 		}
-
 	case protocol.IPv4_MSG: // other type of packet that must processing by controller
 		log.Errorf("controller received non arp packet error.")
 		return
@@ -114,6 +158,11 @@ func (l *LocalBridge) processArp(pkt protocol.Ethernet, inPort uint32) {
 	case *protocol.ARP:
 		var arpIn protocol.ARP = *t
 
+		select {
+		case l.datapathManager.ArpChan <- arpIn:
+		default: // Non-block when arpChan is full
+		}
+
 		l.learnedIPAddressMapMutex.Lock()
 		defer l.learnedIPAddressMapMutex.Unlock()
 		l.setLocalEndpointIPAddr(arpIn, inPort)
@@ -122,11 +171,6 @@ func (l *LocalBridge) processArp(pkt protocol.Ethernet, inPort uint32) {
 			l.processLocalEndpointUpdate(arpIn, inPort)
 		} else if ok && ipReference.updateTimes > 0 {
 			l.processLocalEndpointUpdate(arpIn, inPort)
-		}
-
-		select {
-		case l.datapathManager.ArpChan <- ArpInfo{InPort: inPort, Pkt: arpIn, BrName: l.name}:
-		default: // Non-block when arpChan is full
 		}
 	default:
 		log.Infof("error pkt type")
@@ -271,7 +315,7 @@ func (l *LocalBridge) BridgeInit() {
 }
 
 func (l *LocalBridge) BridgeInitCNI() {
-	if l.datapathManager.Config.EnableCNI {
+	if l.datapathManager.AgentInfo.EnableCNI {
 		sw := l.OfSwitch
 		l.cniConntrackCommitTable, _ = sw.NewTable(CNI_CT_COMMIT_TABLE)
 		l.cniConntrackRedirectTable, _ = sw.NewTable(CNI_CT_REDIRECT_TABLE)
@@ -288,10 +332,10 @@ func (l *LocalBridge) initLocalGwArpFlow(sw *ofctrl.OFSwitch) error {
 	// target for local pod
 	arpPodFlow, _ := l.vlanInputTable.NewFlow(ofctrl.FlowMatch{
 		Priority:   HIGH_MATCH_FLOW_PRIORITY,
-		InputPort:  l.datapathManager.Info.LocalGwOfPort,
+		InputPort:  l.datapathManager.AgentInfo.LocalGwOfPort,
 		Ethertype:  PROTOCOL_ARP,
-		ArpTpa:     &l.datapathManager.Info.PodCIDR[0].IP,
-		ArpTpaMask: (*net.IP)(&l.datapathManager.Info.PodCIDR[0].Mask),
+		ArpTpa:     &l.datapathManager.AgentInfo.PodCIDR[0].IP,
+		ArpTpaMask: (*net.IP)(&l.datapathManager.AgentInfo.PodCIDR[0].Mask),
 	})
 	flood, _ := sw.OutputPort(openflow13.P_FLOOD)
 	if err := arpPodFlow.Next(flood); err != nil {
@@ -301,14 +345,14 @@ func (l *LocalBridge) initLocalGwArpFlow(sw *ofctrl.OFSwitch) error {
 	// target for other ip, response arp with uplink gateway mac address
 	arpGwFlow, _ := l.vlanInputTable.NewFlow(ofctrl.FlowMatch{
 		Priority:  MID_MATCH_FLOW_PRIORITY,
-		InputPort: l.datapathManager.Info.LocalGwOfPort,
+		InputPort: l.datapathManager.AgentInfo.LocalGwOfPort,
 		Ethertype: PROTOCOL_ARP,
 	})
 	// set actions for arp response
 	if err := arpGwFlow.MoveField(32, 0, 0, "nxm_of_arp_tpa", "nxm_of_arp_spa", false); err != nil {
 		return err
 	}
-	if err := arpGwFlow.LoadField("nxm_nx_arp_sha", ParseMacToUint64(l.datapathManager.Info.GatewayMac), openflow13.NewNXRange(0, 47)); err != nil {
+	if err := arpGwFlow.LoadField("nxm_nx_arp_sha", ParseMacToUint64(l.datapathManager.AgentInfo.GatewayMac), openflow13.NewNXRange(0, 47)); err != nil {
 		return err
 	}
 	if err := arpGwFlow.MoveField(48, 0, 0, "nxm_nx_arp_sha", "nxm_nx_arp_tha", false); err != nil {
@@ -333,16 +377,16 @@ func (l *LocalBridge) initLocalGwArpFlow(sw *ofctrl.OFSwitch) error {
 	// target for other ip, response arp with uplink gateway mac address
 	arpGwFlowHigh, _ := l.vlanInputTable.NewFlow(ofctrl.FlowMatch{
 		Priority:   HIGH_MATCH_FLOW_PRIORITY + FLOW_MATCH_OFFSET,
-		InputPort:  l.datapathManager.Info.LocalGwOfPort,
+		InputPort:  l.datapathManager.AgentInfo.LocalGwOfPort,
 		Ethertype:  PROTOCOL_ARP,
-		ArpTpa:     &l.datapathManager.Info.GatewayIP,
+		ArpTpa:     &l.datapathManager.AgentInfo.GatewayIP,
 		ArpTpaMask: &net.IPv4bcast,
 	})
 	// set actions for arp response
 	if err := arpGwFlowHigh.MoveField(32, 0, 0, "nxm_of_arp_tpa", "nxm_of_arp_spa", false); err != nil {
 		return err
 	}
-	if err := arpGwFlowHigh.LoadField("nxm_nx_arp_sha", ParseMacToUint64(l.datapathManager.Info.GatewayMac), openflow13.NewNXRange(0, 47)); err != nil {
+	if err := arpGwFlowHigh.LoadField("nxm_nx_arp_sha", ParseMacToUint64(l.datapathManager.AgentInfo.GatewayMac), openflow13.NewNXRange(0, 47)); err != nil {
 		return err
 	}
 	if err := arpGwFlowHigh.MoveField(48, 0, 0, "nxm_nx_arp_sha", "nxm_nx_arp_tha", false); err != nil {
@@ -367,14 +411,14 @@ func (l *LocalBridge) initToLocalGwFlow(sw *ofctrl.OFSwitch) error {
 	localToLocalGw, _ := l.fromLocalRedirectTable.NewFlow(ofctrl.FlowMatch{
 		Priority:  HIGH_MATCH_FLOW_PRIORITY,
 		Ethertype: PROTOCOL_IP,
-		IpDa:      &l.datapathManager.Info.ClusterCIDR.IP,
-		IpDaMask:  (*net.IP)(&l.datapathManager.Info.ClusterCIDR.Mask),
+		IpDa:      &l.datapathManager.AgentInfo.ClusterCIDR.IP,
+		IpDaMask:  (*net.IP)(&l.datapathManager.AgentInfo.ClusterCIDR.Mask),
 	})
-	_ = localToLocalGw.LoadField("nxm_of_eth_dst", ParseMacToUint64(l.datapathManager.Info.LocalGwMac),
+	_ = localToLocalGw.LoadField("nxm_of_eth_dst", ParseMacToUint64(l.datapathManager.AgentInfo.LocalGwMac),
 		openflow13.NewNXRange(0, 47))
 	_ = localToLocalGw.LoadField("nxm_nx_pkt_mark", 0x1,
 		openflow13.NewNXRange(29, 29))
-	outputPortLocalGateWay, _ := sw.OutputPort(l.datapathManager.Info.LocalGwOfPort)
+	outputPortLocalGateWay, _ := sw.OutputPort(l.datapathManager.AgentInfo.LocalGwOfPort)
 	if err := localToLocalGw.Next(outputPortLocalGateWay); err != nil {
 		return fmt.Errorf("failed to install from localToLocalGw flow, error: %v", err)
 	}
@@ -399,7 +443,7 @@ func (l *LocalBridge) initToLocalGwFlow(sw *ofctrl.OFSwitch) error {
 		Ethertype: PROTOCOL_IP,
 		InputPort: uint32(l.datapathManager.BridgeChainPortMap[l.name][LocalToPolicySuffix]),
 	})
-	if err := outToLocalGw.LoadField("nxm_of_eth_dst", ParseMacToUint64(l.datapathManager.Info.LocalGwMac),
+	if err := outToLocalGw.LoadField("nxm_of_eth_dst", ParseMacToUint64(l.datapathManager.AgentInfo.LocalGwMac),
 		openflow13.NewNXRange(0, 47)); err != nil {
 		return err
 	}
@@ -448,11 +492,11 @@ func (l *LocalBridge) initFromLocalGwFlow(sw *ofctrl.OFSwitch) error {
 	localGwToPolicy, _ := l.vlanInputTable.NewFlow(ofctrl.FlowMatch{
 		Priority:    HIGH_MATCH_FLOW_PRIORITY,
 		Ethertype:   PROTOCOL_IP,
-		InputPort:   l.datapathManager.Info.LocalGwOfPort,
+		InputPort:   l.datapathManager.AgentInfo.LocalGwOfPort,
 		PktMark:     0x20000000,
 		PktMarkMask: &pktMarkMask,
 	})
-	if err := localGwToPolicy.LoadField("nxm_of_eth_src", ParseMacToUint64(l.datapathManager.Info.LocalGwMac),
+	if err := localGwToPolicy.LoadField("nxm_of_eth_src", ParseMacToUint64(l.datapathManager.AgentInfo.LocalGwMac),
 		openflow13.NewNXRange(0, 47)); err != nil {
 		return err
 	}
@@ -464,9 +508,9 @@ func (l *LocalBridge) initFromLocalGwFlow(sw *ofctrl.OFSwitch) error {
 	localGwToLocal, _ := l.vlanInputTable.NewFlow(ofctrl.FlowMatch{
 		Priority:  MID_MATCH_FLOW_PRIORITY,
 		Ethertype: PROTOCOL_IP,
-		InputPort: l.datapathManager.Info.LocalGwOfPort,
+		InputPort: l.datapathManager.AgentInfo.LocalGwOfPort,
 	})
-	if err := localGwToLocal.LoadField("nxm_of_eth_src", ParseMacToUint64(l.datapathManager.Info.LocalGwMac),
+	if err := localGwToLocal.LoadField("nxm_of_eth_src", ParseMacToUint64(l.datapathManager.AgentInfo.LocalGwMac),
 		openflow13.NewNXRange(0, 47)); err != nil {
 		return err
 	}
@@ -539,41 +583,6 @@ func (l *LocalBridge) InitFromLocalLearnAction(fromLocalLearnAction *ofctrl.Lear
 	return nil
 }
 
-func (l *LocalBridge) InitFromLocalTrunkPortLearnAction(fromLocalLearnAction *ofctrl.LearnAction) error {
-	learnDstMatchField1 := &ofctrl.LearnField{
-		Name:  "nxm_of_vlan_tci",
-		Start: 0,
-	}
-	learnSrcMatchField1 := &ofctrl.LearnField{
-		Name:  "nxm_of_vlan_tci",
-		Start: 0,
-	}
-	learnDstMatchField2 := &ofctrl.LearnField{
-		Name:  "nxm_of_eth_dst",
-		Start: 0,
-	}
-	learnSrcMatchField2 := &ofctrl.LearnField{
-		Name:  "nxm_of_eth_src",
-		Start: 0,
-	}
-
-	err := fromLocalLearnAction.AddLearnedMatch(learnDstMatchField1, 12, learnSrcMatchField1, nil)
-	if err != nil {
-		return fmt.Errorf("failed to initialize learn action, AddLearnedMatch nxm_of_vlan_tci failure, error: %v", err)
-	}
-	err = fromLocalLearnAction.AddLearnedMatch(learnDstMatchField2, 48, learnSrcMatchField2, nil)
-	if err != nil {
-		return fmt.Errorf("failed to initialize learn action, AddLearnedMatch nxm_of_eth_dst failure, error: %v", err)
-	}
-
-	err = fromLocalLearnAction.AddLearnedOutputAction(&ofctrl.LearnField{Name: "nxm_of_in_port", Start: 0}, 16)
-	if err != nil {
-		return fmt.Errorf("failed to initialize learn action: AddLearnedOutputAction output:nxm_of_in_port failure, error: %v", err)
-	}
-
-	return nil
-}
-
 func (l *LocalBridge) initVlanInputTable(sw *ofctrl.OFSwitch) error {
 	// vlanInput table
 	fromUpstreamFlow, _ := l.vlanInputTable.NewFlow(ofctrl.FlowMatch{
@@ -631,30 +640,6 @@ func (l *LocalBridge) initFromLocalL2LearningTable() error {
 	}
 	if err := l2LearningFlow.Next(ofctrl.NewEmptyElem()); err != nil {
 		return fmt.Errorf("failed to install l2Learning flow, error: %v", err)
-	}
-
-	trunkPortL2LearningFlow, _ := l.localEndpointL2LearningTable.NewFlow(ofctrl.FlowMatch{
-		Priority: NORMAL_MATCH_FLOW_PRIORITY,
-		Regs: []*ofctrl.NXRegister{
-			{
-				RegID: constants.OVSReg3,
-				Data:  0x1,
-				Range: openflow13.NewNXRange(0, 1),
-			},
-		},
-	})
-
-	fromLocalTrunkLearnAction := ofctrl.NewLearnAction(L2_FORWARDING_TABLE, MID_MATCH_FLOW_PRIORITY+3,
-		LocalBridgeL2ForwardingTableIdleTimeout, LocalBridgeL2ForwardingTableHardTimeout, 0, 0, 0)
-	if err := l.InitFromLocalTrunkPortLearnAction(fromLocalTrunkLearnAction); err != nil {
-		return fmt.Errorf("failed to initialize from local learn action, error: %v", err)
-	}
-
-	if err := trunkPortL2LearningFlow.Learn(fromLocalTrunkLearnAction); err != nil {
-		return fmt.Errorf("failed to install from trunk port l2Learning flow learn action, error: %v", err)
-	}
-	if err := trunkPortL2LearningFlow.Next(ofctrl.NewEmptyElem()); err != nil {
-		return fmt.Errorf("failed to install form trunk port l2Learning flow, error: %v", err)
 	}
 
 	return nil
@@ -723,11 +708,9 @@ func (l *LocalBridge) AddLocalEndpoint(endpoint *Endpoint) error {
 	if strings.HasSuffix(endpoint.InterfaceName, LocalToPolicySuffix) {
 		return nil
 	}
-	if strings.HasSuffix(endpoint.InterfaceName, LocalToNatSuffix) {
-		return nil
-	}
+
 	// skip cni gateway
-	if l.datapathManager.Info.LocalGwName == endpoint.InterfaceName {
+	if l.datapathManager.AgentInfo.LocalGwName == endpoint.InterfaceName {
 		return nil
 	}
 
@@ -739,12 +722,6 @@ func (l *LocalBridge) AddLocalEndpoint(endpoint *Endpoint) error {
 	})
 	if endpoint.VlanID != 0 {
 		if err := vlanInputTableFromLocalFlow.SetVlan(endpoint.VlanID); err != nil {
-			return err
-		}
-	}
-	if endpoint.Trunk != "" {
-		if err := vlanInputTableFromLocalFlow.LoadField("nxm_nx_reg3", uint64(1),
-			openflow13.NewNXRange(0, 1)); err != nil {
 			return err
 		}
 	}
@@ -765,40 +742,24 @@ func (l *LocalBridge) AddLocalEndpoint(endpoint *Endpoint) error {
 	l.fromLocalEndpointFlow[endpoint.PortNo] = vlanInputTableFromLocalFlow
 
 	// Table 1, from local to local bum redirect flow
-	if endpoint.Trunk == "" {
-		endpointMac, _ := net.ParseMAC(endpoint.MacAddrStr)
-		localToLocalBUMFlow, _ := l.localEndpointL2ForwardingTable.NewFlow(ofctrl.FlowMatch{
-			Priority:   MID_MATCH_FLOW_PRIORITY,
-			MacSa:      &endpointMac,
-			VlanId:     endpoint.VlanID,
-			VlanIdMask: &vlanIDMask,
-		})
-		if err := localToLocalBUMFlow.LoadField("nxm_of_vlan_tci", 0, openflow13.NewNXRange(0, 12)); err != nil {
-			return err
-		}
-		if err := localToLocalBUMFlow.LoadField("nxm_of_in_port", uint64(endpoint.PortNo), openflow13.NewNXRange(0, 15)); err != nil {
-			return err
-		}
-		if err := localToLocalBUMFlow.Next(l.OfSwitch.NormalLookup()); err != nil {
-			return err
-		}
-		log.Infof("add local to local flow: %v", localToLocalBUMFlow)
-		l.localToLocalBUMFlow[endpoint.PortNo] = localToLocalBUMFlow
-	} else {
-		endpointMac, _ := net.ParseMAC(endpoint.MacAddrStr)
-		localToLocalBUMFlow, _ := l.localEndpointL2ForwardingTable.NewFlow(ofctrl.FlowMatch{
-			Priority: MID_MATCH_FLOW_PRIORITY,
-			MacSa:    &endpointMac,
-		})
-		if err := localToLocalBUMFlow.LoadField("nxm_of_in_port", uint64(endpoint.PortNo), openflow13.NewNXRange(0, 15)); err != nil {
-			return err
-		}
-		if err := localToLocalBUMFlow.Next(l.OfSwitch.NormalLookup()); err != nil {
-			return err
-		}
-		log.Infof("add local to local flow: %v", localToLocalBUMFlow)
-		l.localToLocalBUMFlow[endpoint.PortNo] = localToLocalBUMFlow
+	endpointMac, _ := net.ParseMAC(endpoint.MacAddrStr)
+	localToLocalBUMFlow, _ := l.localEndpointL2ForwardingTable.NewFlow(ofctrl.FlowMatch{
+		Priority:   MID_MATCH_FLOW_PRIORITY,
+		MacSa:      &endpointMac,
+		VlanId:     endpoint.VlanID,
+		VlanIdMask: &vlanIDMask,
+	})
+	if err := localToLocalBUMFlow.LoadField("nxm_of_vlan_tci", 0, openflow13.NewNXRange(0, 12)); err != nil {
+		return err
 	}
+	if err := localToLocalBUMFlow.LoadField("nxm_of_in_port", uint64(endpoint.PortNo), openflow13.NewNXRange(0, 15)); err != nil {
+		return err
+	}
+	if err := localToLocalBUMFlow.Next(l.OfSwitch.NormalLookup()); err != nil {
+		return err
+	}
+	log.Infof("add local to local flow: %v", localToLocalBUMFlow)
+	l.localToLocalBUMFlow[endpoint.PortNo] = localToLocalBUMFlow
 
 	return nil
 }

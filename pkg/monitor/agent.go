@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -281,19 +280,12 @@ func (monitor *AgentMonitor) fetchPortLocked(ovsdbCache OVSDBCache, uuid ovsdb.U
 
 	// json number type is always float64
 	ovsTag, _ := ovsPort.Fields["tag"].(float64)
-	var ovsTrunks []float64
-	trunks, ok := ovsPort.Fields["trunks"].(ovsdb.OvsSet)
-	if ok {
-		for _, item := range trunks.GoSet {
-			ovsTrunks = append(ovsTrunks, item.(float64))
-		}
-	}
-	trunkString := strings.Trim(strings.Join(strings.Split(fmt.Sprintf("%v", ovsTrunks), " "), ","), "[]")
+	ovsTrunks, _ := ovsPort.Fields["trunks"].(float64)
 
 	port.VlanConfig = &agentv1alpha1.VlanConfig{
 		VlanMode: vlanModeMap[ovsVlanMode],
 		Tag:      int32(ovsTag),
-		Trunk:    trunkString,
+		Trunks:   int32(ovsTrunks),
 	}
 
 	port.BondConfig = &agentv1alpha1.BondConfig{
