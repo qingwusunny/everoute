@@ -1507,6 +1507,8 @@ enum NetworkPolicyRulePortProtocol {
     ICMP
     TCP
     UDP
+    FTP
+    TFTP
 }
 
 enum NetworkPolicyRuleType {

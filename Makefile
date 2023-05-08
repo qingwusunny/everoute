@@ -95,6 +95,10 @@ docker-e2e-test: image-test
 	$(eval WORKDIR := /go/src/github.com/everoute/everoute)
 	docker run --rm -iu 0:0 -e USER=root -w $(WORKDIR) -v $(CURDIR):$(WORKDIR) -v /lib/modules:/lib/modules --privileged everoute/unit-test make docker-e2e-test-entry
 
+docker-e2e-test-debug: image-test
+	$(eval WORKDIR := /go/src/github.com/everoute/everoute)
+	docker run --rm -iu 0:0 -e USER=root -w $(WORKDIR) -v $(CURDIR):$(WORKDIR) -v /lib/modules:/lib/modules -it --privileged everoute/unit-test bash
+
 # Generate deepcopy, client, openapi codes
 codegen: manifests
 	$(APISERVER_BOOT) build generated --generator openapi --generator client --generator deepcopy --copyright hack/boilerplate.generatego.txt \
