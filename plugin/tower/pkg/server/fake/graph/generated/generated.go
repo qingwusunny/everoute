@@ -55,6 +55,8 @@ type ComplexityRoot struct {
 		GlobalDefaultAction func(childComplexity int) int
 		GlobalWhitelist     func(childComplexity int) int
 		ID                  func(childComplexity int) int
+		Kubeconfig          func(childComplexity int) int
+		Version             func(childComplexity int) int
 	}
 
 	EverouteClusterEvent struct {
@@ -383,6 +385,20 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.EverouteCluster.ID(childComplexity), true
+
+	case "EverouteCluster.kubeconfig":
+		if e.complexity.EverouteCluster.Kubeconfig == nil {
+			break
+		}
+
+		return e.complexity.EverouteCluster.Kubeconfig(childComplexity), true
+
+	case "EverouteCluster.version":
+		if e.complexity.EverouteCluster.Version == nil {
+			break
+		}
+
+		return e.complexity.EverouteCluster.Version(childComplexity), true
 
 	case "EverouteClusterEvent.mutation":
 		if e.complexity.EverouteClusterEvent.Mutation == nil {
@@ -1731,11 +1747,13 @@ type Label {
 
 type EverouteCluster {
     id: ID!
+    version:String!
     agent_elf_clusters: [ObjectReference!]
     agent_elf_vdses: [ObjectReference!]
     controller_instances: [EverouteControllerInstance!]!
     global_default_action: GlobalPolicyAction!
     global_whitelist: EverouteClusterWhitelist
+    kubeconfig: String
 }
 
 type EverouteClusterWhitelist {
@@ -1899,6 +1917,41 @@ func (ec *executionContext) _EverouteCluster_id(ctx context.Context, field graph
 	res := resTmp.(string)
 	fc.Result = res
 	return ec.marshalNID2string(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _EverouteCluster_version(ctx context.Context, field graphql.CollectedField, obj *schema.EverouteCluster) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "EverouteCluster",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   false,
+		IsResolver: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Version, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(string)
+	fc.Result = res
+	return ec.marshalNString2string(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) _EverouteCluster_agent_elf_clusters(ctx context.Context, field graphql.CollectedField, obj *schema.EverouteCluster) (ret graphql.Marshaler) {
@@ -2065,6 +2118,38 @@ func (ec *executionContext) _EverouteCluster_global_whitelist(ctx context.Contex
 	res := resTmp.(schema.EverouteClusterWhitelist)
 	fc.Result = res
 	return ec.marshalOEverouteClusterWhitelist2githubᚗcomᚋeverouteᚋeverouteᚋpluginᚋtowerᚋpkgᚋschemaᚐEverouteClusterWhitelist(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _EverouteCluster_kubeconfig(ctx context.Context, field graphql.CollectedField, obj *schema.EverouteCluster) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:     "EverouteCluster",
+		Field:      field,
+		Args:       nil,
+		IsMethod:   false,
+		IsResolver: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Kubeconfig, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(string)
+	fc.Result = res
+	return ec.marshalOString2string(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) _EverouteClusterEvent_mutation(ctx context.Context, field graphql.CollectedField, obj *model.EverouteClusterEvent) (ret graphql.Marshaler) {
@@ -8021,6 +8106,11 @@ func (ec *executionContext) _EverouteCluster(ctx context.Context, sel ast.Select
 			if out.Values[i] == graphql.Null {
 				invalids++
 			}
+		case "version":
+			out.Values[i] = ec._EverouteCluster_version(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
 		case "agent_elf_clusters":
 			out.Values[i] = ec._EverouteCluster_agent_elf_clusters(ctx, field, obj)
 		case "agent_elf_vdses":
@@ -8037,6 +8127,8 @@ func (ec *executionContext) _EverouteCluster(ctx context.Context, sel ast.Select
 			}
 		case "global_whitelist":
 			out.Values[i] = ec._EverouteCluster_global_whitelist(ctx, field, obj)
+		case "kubeconfig":
+			out.Values[i] = ec._EverouteCluster_kubeconfig(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}

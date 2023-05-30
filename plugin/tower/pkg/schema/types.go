@@ -100,11 +100,13 @@ type LabelList struct {
 type EverouteCluster struct {
 	ObjectMeta
 
+	Version             string                       `json:"version"`
 	AgentELFClusters    []ObjectReference            `json:"agent_elf_clusters"`
 	AgentELFVDSes       []ObjectReference            `json:"agent_elf_vdses,omitempty"`
 	ControllerInstances []EverouteControllerInstance `json:"controller_instances"`
 	GlobalDefaultAction GlobalPolicyAction           `json:"global_default_action"`
 	GlobalWhitelist     EverouteClusterWhitelist     `json:"global_whitelist,omitempty"`
+	Kubeconfig          string                       `json:"kubeconfig,omitempty"`
 }
 
 type EverouteClusterWhitelist struct {

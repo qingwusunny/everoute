@@ -57,11 +57,13 @@ type Label {
 
 type EverouteCluster {
     id: ID!
+    version:String!
     agent_elf_clusters: [ObjectReference!]
     agent_elf_vdses: [ObjectReference!]
     controller_instances: [EverouteControllerInstance!]!
     global_default_action: GlobalPolicyAction!
     global_whitelist: EverouteClusterWhitelist
+    kubeconfig: String
 }
 
 type EverouteClusterWhitelist {
