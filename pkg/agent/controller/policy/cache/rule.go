@@ -228,6 +228,7 @@ func (rule *CompleteRule) generateRuleList(srcIPBlocks, dstIPBlocks map[string]*
 		}
 	}
 
+	klog.Infof("complete rule: %v, policyRuleList: %v", *rule, policyRuleList)
 	return policyRuleList
 }
 
