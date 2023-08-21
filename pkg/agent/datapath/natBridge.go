@@ -63,10 +63,6 @@ var (
 	BackendPortRegNumber int                 = 2
 	BackendPortRange     *openflow13.NXRange = openflow13.NewNXRange(0, 15)
 
-	EtherTypeLength         uint16 = 16
-	IPv4Lenth               uint16 = 32
-	ProtocolLength          uint16 = 8
-	PortLength              uint16 = 16
 	ChooseBackendFlagLength uint16 = 1
 )
 

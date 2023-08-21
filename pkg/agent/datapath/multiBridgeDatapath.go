@@ -48,7 +48,7 @@ import (
 	"github.com/everoute/everoute/pkg/utils"
 )
 
-//nolint
+// nolint
 const (
 	HIGH_MATCH_FLOW_PRIORITY            = 300
 	MID_MATCH_FLOW_PRIORITY             = 200
@@ -59,7 +59,7 @@ const (
 	FLOW_MATCH_OFFSET                   = 3
 )
 
-//nolint
+// nolint
 const (
 	POLICY_TIER1    = 50
 	POLICY_TIER2    = 100
@@ -67,19 +67,19 @@ const (
 	POLICY_TIER3    = 150
 )
 
-//nolint
+// nolint
 const (
 	POLICY_DIRECTION_OUT = 0
 	POLICY_DIRECTION_IN  = 1
 )
 
-//nolint
+// nolint
 const (
 	IP_BROADCAST_ADDR = "255.255.255.255"
 	LOOP_BACK_ADDR    = "127.0.0.1"
 )
 
-//nolint
+// nolint
 const (
 	FLOW_ROUND_NUM_LENGTH           = 4
 	FLOW_SEQ_NUM_LENGTH             = 28
@@ -88,7 +88,7 @@ const (
 	DEFAULT_POLICY_ENFORCEMENT_MODE = "work"
 )
 
-//nolint
+// nolint
 const (
 	PROTOCOL_ARP = 0x0806
 	PROTOCOL_IP  = 0x0800
@@ -96,7 +96,7 @@ const (
 	PROTOCOL_TCP = 0x06
 )
 
-//nolint
+// nolint
 const (
 	LOCAL_BRIDGE_KEYWORD  = "local"
 	POLICY_BRIDGE_KEYWORD = "policy"
@@ -141,6 +141,16 @@ const (
 	MaxArpChanCache = 100
 
 	MaxCleanConntrackChanSize = 5000
+)
+
+var (
+	EtherTypeLength uint16 = 16
+	ProtocolLength  uint16 = 8
+	MacLength       uint16 = 48
+	IPv4Lenth       uint16 = 32
+	PortLength      uint16 = 16
+
+	ArpOperReply uint64 = 2
 )
 
 var IPMaskMatchFullBit = net.ParseIP("255.255.255.255")
@@ -488,17 +498,7 @@ func (datapathManager *DpManager) InitializeCNI() {
 
 func NewVDSForConfig(datapathManager *DpManager, vdsID, ovsbrname string) {
 	NewVDSForConfigBase(datapathManager, vdsID, ovsbrname)
-	if datapathManager.Config.EnableCNI {
-		NewVDSForConfigCNI(datapathManager, vdsID, ovsbrname)
-	}
-}
-
-func NewVDSForConfigCNI(datapathManager *DpManager, vdsID, ovsbrname string) {
-	if datapathManager.Config.CNIConfig == nil {
-		log.Info("No CNI config")
-		return
-	}
-	if datapathManager.Config.CNIConfig.EnableProxy {
+	if datapathManager.IsEnableProxy() {
 		NewVDSForConfigProxy(datapathManager, vdsID, ovsbrname)
 	}
 }
@@ -537,7 +537,7 @@ func NewVDSForConfigProxy(datapathManager *DpManager, vdsID, ovsbrname string) {
 	go natControl.Connect(fmt.Sprintf("%s/%s.%s", ovsVswitchdUnixDomainSockPath, natBr.GetName(), ovsVswitchdUnixDomainSockSuffix))
 }
 
-//nolint
+// nolint
 func NewVDSForConfigBase(datapathManager *DpManager, vdsID, ovsbrname string) {
 	// initialize vds bridge chain
 	localBridge := NewLocalBridge(ovsbrname, datapathManager)
