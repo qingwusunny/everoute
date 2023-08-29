@@ -41,8 +41,9 @@ type LocalBridgeOverlay struct {
 	paddingL2Table      *ofctrl.Table
 	outputTable         *ofctrl.Table
 
-	enableProxy bool
-	natPort     uint32
+	enableProxy    bool
+	natPort        uint32
+	localEpFlowMap map[string]*ofctrl.Flow
 }
 
 func newLocalBridgeOverlay(brName string, datapathManager *DpManager) *LocalBridgeOverlay {
@@ -53,6 +54,7 @@ func newLocalBridgeOverlay(brName string, datapathManager *DpManager) *LocalBrid
 	localBridge := &LocalBridgeOverlay{}
 	localBridge.name = brName
 	localBridge.datapathManager = datapathManager
+	localBridge.localEpFlowMap = make(map[string]*ofctrl.Flow)
 
 	return localBridge
 }
@@ -104,6 +106,74 @@ func (l *LocalBridgeOverlay) BridgeInitCNI() {
 	if err := l.initOutputTable(); err != nil {
 		log.Fatalf("Failed to init output table of local bridge overlay, err: %v", err)
 	}
+}
+
+func (l *LocalBridgeOverlay) AddLocalEndpoint(endpoint *Endpoint) error {
+	if endpoint == nil {
+		return nil
+	}
+	if l.localEpFlowMap[endpoint.InterfaceUUID] != nil {
+		log.Infof("Local bridge overlay, the endpoint %+v related flow in forward to local table has been installed, skip add again", endpoint)
+		return nil
+	}
+	log.Infof("zjjjjj ep: %v, ep+: %+v, *ep: %v, *ep+: %+v", endpoint, endpoint, *endpoint, *endpoint)
+	macAddr, err := net.ParseMAC(endpoint.MacAddrStr)
+	if err != nil {
+		log.Errorf("The endpoint %+v has invalid mac addr, err: %s", endpoint, err)
+		return err
+	}
+
+	if endpoint.IPAddr == nil {
+		log.Infof("the endpoint %+v IPAddr is empty, skip add flow to forward to local table for local bridge overlay", endpoint)
+		return nil
+	}
+
+	if endpoint.IPAddr.To4() == nil {
+		log.Errorf("Failed to add flow to forward to local table for local bridge overlay: the endpoint %+v IPAddr is not valid ipv4", endpoint)
+		return fmt.Errorf("the endpoint %+v IPAddr is not valid ipv4", endpoint)
+	}
+
+	flow, _ := l.forwardToLocalTable.NewFlow(ofctrl.FlowMatch{
+		Priority:  HIGH_MATCH_FLOW_PRIORITY,
+		Ethertype: PROTOCOL_IP,
+		IpDa:      &endpoint.IPAddr,
+	})
+	if err := flow.SetMacDa(macAddr); err != nil {
+		log.Errorf("Failed to setup forward to local table flow set dst mac action for endpoint: %v, err: %v", *endpoint, err)
+		return err
+	}
+	if err := flow.LoadField(LBOOutputPortReg, uint64(endpoint.PortNo), LBOOutputPortRange); err != nil {
+		log.Errorf("Failed to setup forward to local table flow load field action for endpoint: %v, err: %v", *endpoint, err)
+		return err
+	}
+	if err := flow.Resubmit(nil, &LBOPaddingL2Table); err != nil {
+		log.Errorf("Failed to setup forward to local table flow resubmit action for endpoint: %v, err: %v", *endpoint, err)
+		return err
+	}
+	if err := flow.Next(ofctrl.NewEmptyElem()); err != nil {
+		log.Errorf("Failed to install forward to local table flow for endpoint: %v, err: %v", *endpoint, err)
+		return err
+	}
+	l.localEpFlowMap[endpoint.InterfaceUUID] = flow
+	log.Infof("Local bridge overlay, success to add local endpoint flow in forward to local table, endpoint: %v", *endpoint)
+	return nil
+}
+
+func (l *LocalBridgeOverlay) RemoveLocalEndpoint(endpoint *Endpoint) error {
+	if endpoint == nil {
+		return nil
+	}
+	delFlow := l.localEpFlowMap[endpoint.InterfaceUUID]
+	if delFlow == nil {
+		return nil
+	}
+	if err := delFlow.Delete(); err != nil {
+		log.Errorf("Failed to delete local endpoint flow in forward to local table, endpoint: %v, err: %v", endpoint, err)
+		return err
+	}
+	delete(l.localEpFlowMap, endpoint.InterfaceUUID)
+	log.Infof("Local bridge overlay: success delete local endpoint flow in forward to local table, endpoint: %v", endpoint)
+	return nil
 }
 
 func (l *LocalBridgeOverlay) initInputTable() error {
