@@ -19,11 +19,11 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"net"
-	"os"
 	"time"
 
+	ipamv1alpha1 "github.com/everoute/ipam/api/ipam/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,6 +63,8 @@ var (
 
 func init() {
 	utilruntime.Must(corev1.AddToScheme(clientsetscheme.Scheme))
+	utilruntime.Must(appsv1.AddToScheme(clientsetscheme.Scheme))
+	utilruntime.Must(ipamv1alpha1.AddToScheme(clientsetscheme.Scheme))
 }
 
 func main() {
@@ -134,7 +136,10 @@ func initCNI(datapathManager *datapath.DpManager, mgr manager.Manager, proxySync
 			overlaySyncChan <- ersource.NewReplayEvent()
 		}
 		datapathManager.SetOverlaySyncFunc(overlayReplayFunc)
+	} else if opts.UseEverouteIPAM() {
+		klog.Fatalf("can't use everoute ipam if disable overlay")
 	}
+
 	if opts.IsEnableProxy() {
 		proxySyncFunc := func() {
 			proxySyncChan <- ersource.NewReplayEvent()
@@ -142,7 +147,11 @@ func initCNI(datapathManager *datapath.DpManager, mgr manager.Manager, proxySync
 		datapathManager.SetProxySyncFunc(proxySyncFunc)
 	}
 
-	setAgentConf(datapathManager, mgr.GetAPIReader())
+	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: clientsetscheme.Scheme})
+	if err != nil {
+		klog.Fatalf("Failed to new a client, err: %v", err)
+	}
+	setAgentConf(datapathManager, c)
 	datapathManager.InitializeCNI()
 }
 
@@ -278,15 +287,11 @@ func resourceUpdate(ctx context.Context, mgr manager.Manager, datapathManager *d
 
 func updateGwEndpoint(k8sClient client.Client, datapathManager *datapath.DpManager) error {
 	ctx := context.Background()
-	ns := os.Getenv(constants.NamespaceNameENV)
-	if ns == "" {
-		return fmt.Errorf("can't get agent namespace from env to create gw-ep endpoint in overlay mode")
-	}
 	epName := utils.GetGwEndpointName(datapathManager.Info.NodeName)
 
 	ep := v1alpha1.Endpoint{}
 	epReq := coretypes.NamespacedName{
-		Namespace: ns,
+		Namespace: opts.namespace,
 		Name:      epName,
 	}
 	err := k8sClient.Get(ctx, epReq, &ep)
@@ -295,7 +300,7 @@ func updateGwEndpoint(k8sClient client.Client, datapathManager *datapath.DpManag
 			ep = v1alpha1.Endpoint{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      epName,
-					Namespace: ns,
+					Namespace: opts.namespace,
 				},
 				Spec: v1alpha1.EndpointSpec{
 					Type: v1alpha1.EndpointStatic,
