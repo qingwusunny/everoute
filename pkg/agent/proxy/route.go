@@ -85,6 +85,17 @@ func GetRouteByDst(dst *net.IPNet) []netlink.Route {
 	return ret
 }
 
+// filter must set dst,gw,table
+func IsRouteExist(filter *netlink.Route) (bool, error) {
+	filterMask := netlink.RT_FILTER_DST|netlink.RT_FILTER_GW|netlink.RT_FILTER_TABLE
+	routes, err := netlink.RouteListFiltered(unix.AF_INET, filter, filterMask)
+	if err != nil {
+		klog.Errorf("Failed to list route by filter %v, err: %v", *filter, err)
+		return false, err
+	}
+	return len(routes) > 0, nil
+}
+
 func RouteEqual(r1, r2 netlink.Route) bool {
 	return ((r1.Dst == nil && r2.Dst == nil) ||
 		(r1.Dst != nil && r2.Dst != nil && r1.Dst.String() == r2.Dst.String())) &&
@@ -281,62 +292,31 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
-func updateRouteForOverlay(clusterPodCIDR *net.IPNet, gatewayIP net.IP) {
-	oldRoutes := GetRouteByDst(clusterPodCIDR)
-	targetRoute := netlink.Route{
-		Dst:   clusterPodCIDR,
-		Gw:    gatewayIP,
-		Table: defaultRouteTable,
-	}
-
-	for i := range oldRoutes {
-		if RouteEqual(oldRoutes[i], targetRoute) {
-			return
-		}
-	}
-
-	if err := netlink.RouteAdd(&targetRoute); err != nil {
-		klog.Errorf("[ALERT] add route item failed, err: %s", err)
-	} else {
-		klog.Infof("add route item %v", targetRoute)
-	}
-}
-
-func SetupRouteAndIPtables(mgr manager.Manager, datapathManager *datapath.DpManager, stopChan <-chan struct{}) error {
-	// route mode
-	if !datapathManager.IsEnableOverlay() {
-		if err := (&NodeReconciler{
-			Client:          mgr.GetClient(),
-			Scheme:          mgr.GetScheme(),
-			DatapathManager: datapathManager,
-			StopChan:        stopChan,
-		}).SetupWithManager(mgr); err != nil {
-			klog.Errorf("unable to create node controller: %s", err.Error())
-			return err
-		}
-		return nil
-	}
-
-	// overlay mode
+// SetupRouteAndIPtables setup route and iptables for overlay mode
+func SetupRouteAndIPtables(mgr manager.Manager, datapathManager *datapath.DpManager, stopChan <-chan struct{}) (*eriptables.OverlayIPtables, *OverlayRoute) {
 	clusterPodCIDR := datapathManager.Info.ClusterPodCIDR
 	clusterPodCIDRString := clusterPodCIDR.String()
 	gatewayIP := datapathManager.Info.GatewayIP
+	if datapathManager.UseEverouteIPAM() {
+		clusterPodCIDRString = ""
+	}
 	iptCtrl := eriptables.NewOverlayIPtables(datapathManager.Config.CNIConfig.EnableProxy, &eriptables.Options{
 		LocalGwName:    datapathManager.Info.LocalGwName,
 		ClusterPodCIDR: clusterPodCIDRString,
 	})
+	routeCtrl := NewOverlayRoute(gatewayIP, clusterPodCIDRString)
 	// update network config every 100 seconds
 	ticker := time.NewTicker(100 * time.Second)
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				updateRouteForOverlay(clusterPodCIDR, gatewayIP)
+				routeCtrl.AddRoute()
 				iptCtrl.Update()
 			case <-stopChan:
 				return
 			}
 		}
 	}()
-	return nil
+	return iptCtrl, routeCtrl
 }

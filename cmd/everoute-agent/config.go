@@ -105,7 +105,7 @@ func (o *Options) complete() error {
 	}
 	o.Config = agentConfig
 
-	if opts.IsEnableCNI() {
+	if o.IsEnableCNI() {
 		ns := os.Getenv(constants.NamespaceNameENV)
 		if ns == "" {
 			return fmt.Errorf("can't get agent namespace from env to create gw-ep endpoint in overlay mode")
