@@ -72,6 +72,7 @@ type Reconciler struct {
 }
 
 func (r *Reconciler) ReconcilePolicy(req ctrl.Request) (ctrl.Result, error) {
+	klog.Infof("zjjj reconcile policy %s", req.NamespacedName)
 	var policy securityv1alpha1.SecurityPolicy
 	var ctx = context.Background()
 
@@ -99,11 +100,12 @@ func (r *Reconciler) ReconcilePolicy(req ctrl.Request) (ctrl.Result, error) {
 
 func (r *Reconciler) ReconcilePatch(req ctrl.Request) (ctrl.Result, error) {
 	var groupName = req.Name
-
+	klog.Infof("zjjj reconcile patch %s", groupName)
 	patch := r.groupCache.NextPatch(groupName)
 	if patch == nil {
 		return ctrl.Result{}, nil
 	}
+	klog.Infof("zjjj reconcile patch %s, revision %d", groupName, patch.Revision)
 
 	r.reconcilerLock.Lock()
 	defer r.reconcilerLock.Unlock()
@@ -185,6 +187,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	if err = patchController.Watch(&source.Kind{Type: &groupv1alpha1.GroupMembers{}}, &handler.Funcs{
 		CreateFunc: func(e event.CreateEvent, q workqueue.RateLimitingInterface) {
+			klog.Infof("zjjj gm %v", e.Meta.GetName())
 			r.groupCache.AddGroupMembership(e.Object.(*groupv1alpha1.GroupMembers))
 			// add into queue to process the group patches.
 			q.Add(ctrl.Request{NamespacedName: k8stypes.NamespacedName{
@@ -193,6 +196,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}})
 		},
 		DeleteFunc: func(e event.DeleteEvent, q workqueue.RateLimitingInterface) {
+			klog.Infof("zjjj del gm %v", e.Meta.GetName())
 			r.groupCache.DelGroupMembership(e.Meta.GetName())
 		},
 	}); err != nil {
@@ -221,6 +225,7 @@ func (r *Reconciler) addPatch(e event.CreateEvent, q workqueue.RateLimitingInter
 	}
 
 	patch := e.Object.(*groupv1alpha1.GroupMembersPatch)
+	klog.Infof("zjjj gmp %s", patch.GetName())
 	r.groupCache.AddPatch(patch)
 
 	q.Add(ctrl.Request{NamespacedName: k8stypes.NamespacedName{

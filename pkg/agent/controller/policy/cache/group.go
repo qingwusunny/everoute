@@ -215,6 +215,7 @@ func (cache *GroupCache) ApplyPatch(patch *GroupPatch) {
 
 	// upgrade to a new Revision
 	membership.revision = revision + 1
+	klog.Infof("zjjj  membership %v", *membership)
 
 	delete(cache.patches[groupName], revision)
 }
