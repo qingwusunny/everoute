@@ -59,6 +59,9 @@ const (
 	FTPPortRange  = "21"
 	TFTPPortRange = "69"
 
+	BlocklistPriority int32 = 50
+	AllowlistPriority int32 = 0
+
 	vmIndex              = "vmIndex"
 	labelIndex           = "labelIndex"
 	securityGroupIndex   = "securityGroupIndex"
@@ -1039,13 +1042,15 @@ func (c *Controller) parseSecurityPolicy(securityPolicy *schema.SecurityPolicy) 
 			Namespace: c.namespace,
 		},
 		Spec: v1alpha1.SecurityPolicySpec{
+			IsBlocklist:                   securityPolicy.IsBlocklist,
 			Tier:                          constants.Tier2,
+			Priority:                      c.getPolicyPriority(securityPolicy),
 			SecurityPolicyEnforcementMode: policyMode,
-			SymmetricMode:                 true,
+			SymmetricMode:                 c.getPolicySymmetricMode(securityPolicy),
 			AppliedTo:                     applyToPeers,
 			IngressRules:                  ingress,
 			EgressRules:                   egress,
-			DefaultRule:                   v1alpha1.DefaultRuleDrop,
+			DefaultRule:                   c.getPolicyDefaultRule(securityPolicy),
 			PolicyTypes:                   []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
 		},
 	}
@@ -1066,6 +1071,27 @@ func (c *Controller) parseSecurityPolicy(securityPolicy *schema.SecurityPolicy) 
 	}
 
 	return policyList, nil
+}
+
+func (c *Controller) getPolicyPriority(policy *schema.SecurityPolicy) int32 {
+	if policy.IsBlocklist {
+		return BlocklistPriority
+	}
+	return AllowlistPriority
+}
+
+func (c *Controller) getPolicyDefaultRule(policy *schema.SecurityPolicy) v1alpha1.DefaultRuleType {
+	if policy.IsBlocklist {
+		return v1alpha1.DefaultRuleNone
+	}
+	return v1alpha1.DefaultRuleDrop
+}
+
+func (c *Controller) getPolicySymmetricMode(policy *schema.SecurityPolicy) bool {
+	if policy.IsBlocklist {
+		return false
+	}
+	return true
 }
 
 // parseIsolationPolicy convert schema.IsolationPolicy to []v1alpha1.SecurityPolicy
