@@ -56,6 +56,7 @@ import (
 	ctrlpolicy "github.com/everoute/everoute/pkg/controller/policy"
 	"github.com/everoute/everoute/pkg/healthz"
 	"github.com/everoute/everoute/pkg/ipam"
+	"github.com/everoute/everoute/pkg/metrics"
 	"github.com/everoute/everoute/pkg/webhook"
 	towerplugin "github.com/everoute/everoute/plugin/tower/pkg/register"
 	"github.com/everoute/everoute/third_party/cert"
@@ -121,6 +122,9 @@ func main() {
 		klog.Fatalf("unable to start manager: %s", err.Error())
 	}
 
+	controllerMetric := metrics.NewControllerMetric()
+	controllerMetric.Init()
+
 	if !disableAutoTLS {
 		// set secret and webhook
 		setWebhookCert(mgr.GetAPIReader())
@@ -135,8 +139,9 @@ func main() {
 
 	// endpoint controller sync endpoint status from agentinfo.
 	if err = (&endpointctrl.EndpointReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		IPMigrateCount: controllerMetric.GetIPMigrateCount(),
 	}).SetupWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create endpoint controller: %s", err.Error())
 	}
@@ -232,11 +237,13 @@ func main() {
 			healthz.NewInformerSyncHealthz(towerPluginOptions.SharedFactory),
 		),
 	)
+	controllerMetric.InstallHandler(mgr.GetWebhookServer().Register)
 
 	klog.Info("starting manager")
 	if err := mgr.Start(stopCtx); err != nil {
 		klog.Fatalf("error while running manager: %s", err.Error())
 	}
+	controllerMetric.Run(stopCtx)
 }
 
 func setWebhookCert(k8sReader client.Reader) {
