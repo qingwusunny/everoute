@@ -600,12 +600,17 @@ func (r *Reconciler) compareAndApplyPolicyRulesChanges(oldRuleList, newRuleList 
 			errList = append(errList,
 				r.processPolicyRuleAdd(newRule),
 			)
-
+			if newRule.IsTCP() && newRule.IsBlock() {
+				errList = append(errList, r.processPolicyRuleAdd(newRule.Reverse()))
+			}
 		} else if oldExist {
 			klog.Infof("remove policyRule: %v", oldRule)
 			errList = append(errList,
 				r.processPolicyRuleDelete(oldRule.Name),
 			)
+			if oldRule.IsTCP() && oldRule.IsBlock() {
+				errList = append(errList, r.processPolicyRuleDelete(oldRule.Reverse().Name))
+			}
 		}
 	}
 
