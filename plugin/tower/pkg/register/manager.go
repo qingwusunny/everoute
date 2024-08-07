@@ -23,14 +23,23 @@ import (
 	"os"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	runtime "k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/everoute/everoute/pkg/client/clientset_generated/clientset"
 	"github.com/everoute/everoute/pkg/client/informers_generated/externalversions"
+	"github.com/everoute/everoute/pkg/constants"
 	"github.com/everoute/everoute/plugin/tower/pkg/client"
 	"github.com/everoute/everoute/plugin/tower/pkg/controller/endpoint"
 	"github.com/everoute/everoute/plugin/tower/pkg/controller/global"
 	"github.com/everoute/everoute/plugin/tower/pkg/controller/policy"
+	"github.com/everoute/everoute/plugin/tower/pkg/controller/secret"
 	"github.com/everoute/everoute/plugin/tower/pkg/informer"
 )
 
@@ -67,6 +76,7 @@ func InitFlags(opts *Options, flagset *flag.FlagSet, flagPrefix string) {
 	flagset.BoolVar(&opts.Client.AllowInsecure, withPrefix("allow-insecure"), true, "Tower allow-insecure for authenticate")
 	flagset.StringVar(&opts.Client.UserInfo.Source, withPrefix("usersource"), os.Getenv("TOWER_USERSOURCE"), "Tower user source for authenticate")
 	flagset.StringVar(&opts.Client.UserInfo.Password, withPrefix("password"), os.Getenv("TOWER_PASSWORD"), "Tower user password for authenticate")
+	flagset.StringVar(&opts.Client.TokenFile, withPrefix("token-file"), constants.TowerTokenFile, "The file to write tower token")
 	flagset.StringVar(&opts.Namespace, withPrefix("namespace"), "tower-space", "Namespace which endpoint and security policy should create in")
 	flagset.StringVar(&opts.EverouteCluster, withPrefix("everoute-cluster"), "", "Which EverouteCluster should synchronize SecurityPolicy from")
 	flagset.UintVar(&opts.WorkerNumber, withPrefix("worker-number"), 10, "Controller worker number")
@@ -83,6 +93,12 @@ func AddToManager(opts *Options, mgr manager.Manager) error {
 		return fmt.Errorf("must specify one EverouteCluster")
 	}
 
+	towerMgr := newTowerApiServerMgr(opts)
+	if mgr == nil {
+		return fmt.Errorf("failed to new tower manager")
+	}
+	//towerMgr.GetCache().WaitForCacheSync()
+
 	crdClient, err := clientset.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		return err
@@ -97,9 +113,14 @@ func AddToManager(opts *Options, mgr manager.Manager) error {
 	policyController := policy.New(opts.SharedFactory, crdFactory, crdClient, opts.ResyncPeriod, opts.Namespace, opts.EverouteCluster)
 	globalController := global.New(opts.SharedFactory, crdFactory, crdClient, opts.ResyncPeriod, opts.EverouteCluster)
 
+	if err := setupSecretManager(mgr, towerMgr); err != nil {
+		return err
+	}
 	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		opts.SharedFactory.Start(ctx.Done())
 		crdFactory.Start(ctx.Done())
+
+		go towerMgr.Start(ctx)
 
 		go endpointController.Run(opts.WorkerNumber, ctx.Done())
 		go policyController.Run(opts.WorkerNumber, ctx.Done())
@@ -110,4 +131,51 @@ func AddToManager(opts *Options, mgr manager.Manager) error {
 	}))
 
 	return err
+}
+
+func newTowerApiServerMgr(opt *Options) ctrl.Manager {
+	cfg := &rest.Config{}
+	cfg.Host = opt.Client.URL + "/k8s"
+	cfg.TLSClientConfig.Insecure = true
+	cfg.BearerTokenFile = opt.Client.TokenFile
+	scheme := runtime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(scheme))
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme,
+	})
+	if err != nil {
+		klog.Errorf("Failed to new tower apiserver manager: %s", err)
+		return nil
+	}
+	return mgr
+}
+
+func setupSecretManager(erMgr, towerMgr ctrl.Manager) error {
+	secretChan := make(chan event.GenericEvent, 1)
+	if err := (&secret.Watch{
+		Queue:             secretChan,
+		SKSKubeconfigName: constants.SKSKubeconfigName,
+		SKSKubeconfigNs:   constants.SKSKubeconfigNs,
+	}).SetupWithManager(erMgr, "everoute"); err != nil {
+		klog.Errorf("Failed to setup manager for everoute-secret-watch: %s", err)
+		return err
+	}
+	if err := (&secret.Watch{
+		Queue:             secretChan,
+		SKSKubeconfigName: constants.TowerSKSKubeconfigName,
+		SKSKubeconfigNs:   constants.TowerSKSKubeconfigNs,
+	}).SetupWithManager(towerMgr, "tower"); err != nil {
+		klog.Errorf("Failed to setup manager for tower-secret-watch: %s", err)
+		return err
+	}
+
+	if err := (&secret.Process{
+		ERCli:    erMgr.GetClient(),
+		TowerCli: towerMgr.GetClient(),
+	}).SetupWithManager(erMgr, secretChan, erMgr.GetCache(), towerMgr.GetCache()); err != nil {
+		klog.Errorf("Failed to setup manager for secret-process: %s", err)
+		return err
+	}
+	return nil
 }

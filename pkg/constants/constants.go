@@ -172,6 +172,18 @@ const (
 )
 
 const (
+	TowerTokenFile         = "/tmp/towertoken"
+	TowerSKSKubeconfigName = "sks-mgmt-kubeconfig"
+	TowerSKSKubeconfigNs   = "default"
+
+	SKSKubeconfigName = "sks-mgmt-kubeconfig"
+	SKSKubeconfigNs   = "tower-space"
+
+	FinalizerPre           = "everoute.io"
+	SKSKubeconfigFinalizer = FinalizerPre + "/sks-kubeconfig"
+)
+
+const (
 	OVSReg0 = 0
 	OVSReg2 = 2
 	OVSReg3 = 3

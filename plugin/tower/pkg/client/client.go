@@ -23,13 +23,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
+	"github.com/everoute/everoute/pkg/constants"
 	"github.com/everoute/everoute/plugin/tower/pkg/schema"
 	"github.com/everoute/everoute/plugin/tower/pkg/utils"
 )
@@ -54,6 +57,9 @@ type Client struct {
 
 	tokenLock sync.RWMutex
 	token     string
+
+	TokenFile      string
+	writeTokenLock sync.Mutex
 }
 
 const (
@@ -136,7 +142,7 @@ func (c *Client) Query(req *Request) (*Response, error) {
 }
 
 // Auth send login request to tower, and save token
-func (c *Client) Auth() (string, error) {
+func (c *Client) Auth(stopCh <- chan struct{}) (string, error) {
 	var token string
 
 	if c.UserInfo == nil {
@@ -163,6 +169,7 @@ func (c *Client) Auth() (string, error) {
 	}
 
 	c.SetToken(token)
+	go c.WriteToken(stopCh)
 	return token, nil
 }
 
@@ -251,6 +258,44 @@ func (c *Client) SetToken(token string) {
 	c.tokenLock.Lock()
 	defer c.tokenLock.Unlock()
 	c.token = token
+}
+
+func (c *Client) WriteToken(stopCh <- chan struct{}) {
+	c.writeTokenLock.Lock()
+	defer c.writeTokenLock.Unlock()
+
+	ctx := wait.ContextForChannel(stopCh)
+	_ = wait.PollUntilContextCancel(ctx, 3*time.Second, true, func(context.Context) (bool, error) {
+		err := c.writeToken()
+		return err == nil, nil
+	})
+}
+
+func (c *Client) writeToken() error {
+	if c.TokenFile == "" {
+		c.TokenFile = constants.TowerTokenFile
+	}
+	data, err := os.ReadFile(c.TokenFile)
+	oldToken := ""
+	if err != nil {
+		if !os.IsNotExist(err) {
+			klog.Errorf("Failed to read old token from file %s: %s", c.TokenFile, err)
+			return err
+		}
+	} else {
+		oldToken = string(data)
+	}
+
+	if oldToken == c.getToken() {
+		return nil
+	}
+	err = os.WriteFile(c.TokenFile, data, 0666)
+	if err == nil {
+		klog.Info("Success write tower token to file %s", c.TokenFile)
+	} else {
+		klog.Errorf("Failed to write tower token to file %s: %s", c.TokenFile, err)
+	}
+	return err
 }
 
 func (c *Client) getToken() string {
