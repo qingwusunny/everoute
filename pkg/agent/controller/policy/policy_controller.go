@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -69,6 +70,11 @@ type Reconciler struct {
 	groupCache *policycache.GroupCache
 
 	DatapathManager *datapath.DpManager
+
+	sysProcessedPolicyLock sync.RWMutex
+	sysProcessedPolicy     sets.Set[types.NamespacedName]
+
+	globalRuleFirstProcessedTime *time.Time
 }
 
 func (r *Reconciler) ReconcilePolicy(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -170,6 +176,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.groupCache == nil {
 		r.groupCache = policycache.NewGroupCache()
 	}
+
+	r.sysProcessedPolicy = make(sets.Set[k8stypes.NamespacedName])
 
 	if policyController, err = controller.New("policy-controller", mgr, controller.Options{
 		MaxConcurrentReconciles: constants.DefaultMaxConcurrentReconciles,
@@ -279,6 +287,7 @@ func (r *Reconciler) processPolicyUpdate(policy *securityv1alpha1.SecurityPolicy
 		return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 30}, nil
 	}
 
+	r.addProcessedSysPolicy(types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name})
 	return ctrl.Result{}, nil
 }
 
@@ -687,3 +696,41 @@ func (r *Reconciler) addPolicyRuleToDatapath(ruleID string, rule *policycache.Po
 // 	}
 // 	return &sp
 // }
+
+func (r *Reconciler) isReadyToProcessGlobalRule() bool {
+	if r.globalRuleFirstProcessedTime == nil {
+		curT := time.Now()
+		r.globalRuleFirstProcessedTime = &curT
+		klog.Infof("At least wait %s when first process global rule", constants.GlobalRuleFirstDelayTime)
+		time.Sleep(constants.GlobalRuleFirstDelayTime)
+	} else {
+		if time.Now().After((*r.globalRuleFirstProcessedTime).Add(constants.GlobalRuleDelayTimeout)) {
+			return true
+		}
+	}
+
+	r.sysProcessedPolicyLock.RLock()
+	defer r.sysProcessedPolicyLock.RUnlock()
+	if !r.sysProcessedPolicy.Has(constants.SysEPPolicy) {
+		return false
+	}
+	if !r.sysProcessedPolicy.Has(constants.ERvmPolicy) {
+		return false
+	}
+	if !r.sysProcessedPolicy.Has(constants.LBPolicy) {
+		return false
+	}
+	return true
+}
+
+func (r *Reconciler) addProcessedSysPolicy(p types.NamespacedName) {
+	sysPolicy := make(sets.Set[types.NamespacedName])
+	sysPolicy.Insert(constants.SysEPPolicy, constants.ERvmPolicy, constants.LBPolicy)
+	if !sysPolicy.Has(p) {
+		return
+	}
+
+	r.sysProcessedPolicyLock.Lock()
+	defer r.sysProcessedPolicyLock.Unlock()
+	r.sysProcessedPolicy.Insert(p)
+}
