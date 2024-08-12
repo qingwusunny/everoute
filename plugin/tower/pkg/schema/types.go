@@ -16,6 +16,10 @@ limitations under the License.
 
 package schema
 
+import (
+	"k8s.io/apimachinery/pkg/util/sets"
+)
+
 type VM struct {
 	ObjectMeta
 
@@ -106,6 +110,17 @@ type EverouteCluster struct {
 	GlobalDefaultAction GlobalPolicyAction           `json:"global_default_action"`
 	GlobalWhitelist     EverouteClusterWhitelist     `json:"global_whitelist,omitempty"`
 	EnableLogging       bool                         `json:"enable_logging,omitempty"`
+}
+
+func (e *EverouteCluster) GetELFs() sets.Set[string] {
+	res := sets.New[string]()
+	if e == nil {
+		return res
+	}
+	for i := range e.AgentELFClusters {
+		res.Insert(e.AgentELFClusters[i].ID)
+	}
+	return res
 }
 
 type EverouteClusterWhitelist struct {

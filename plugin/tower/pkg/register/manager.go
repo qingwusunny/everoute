@@ -23,11 +23,14 @@ import (
 	"os"
 	"time"
 
+	k8sinformers "k8s.io/client-go/informers"
+	k8sclientset "k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/everoute/everoute/pkg/client/clientset_generated/clientset"
 	"github.com/everoute/everoute/pkg/client/informers_generated/externalversions"
 	"github.com/everoute/everoute/plugin/tower/pkg/client"
+	"github.com/everoute/everoute/plugin/tower/pkg/controller/computecluster"
 	"github.com/everoute/everoute/plugin/tower/pkg/controller/endpoint"
 	"github.com/everoute/everoute/plugin/tower/pkg/controller/global"
 	"github.com/everoute/everoute/plugin/tower/pkg/controller/policy"
@@ -88,6 +91,11 @@ func AddToManager(opts *Options, mgr manager.Manager) error {
 		return err
 	}
 
+	k8sClient, err := k8sclientset.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+	k8sFactory := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, opts.ResyncPeriod, k8sinformers.WithNamespace(opts.Namespace))
 	if opts.SharedFactory == nil {
 		opts.SharedFactory = informer.NewSharedInformerFactory(opts.Client, opts.ResyncPeriod)
 	}
@@ -96,14 +104,18 @@ func AddToManager(opts *Options, mgr manager.Manager) error {
 	endpointController := endpoint.New(opts.SharedFactory, crdFactory, crdClient, opts.ResyncPeriod, opts.Namespace)
 	policyController := policy.New(opts.SharedFactory, crdFactory, crdClient, opts.ResyncPeriod, opts.Namespace, opts.EverouteCluster)
 	globalController := global.New(opts.SharedFactory, crdFactory, crdClient, opts.ResyncPeriod, opts.EverouteCluster)
+	elfController := &computecluster.Controller{EverouteClusterID: opts.EverouteCluster, ConfigmapNamespace: opts.Namespace}
+	elfController.Setup(opts.SharedFactory, k8sFactory, k8sClient)
 
 	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		opts.SharedFactory.Start(ctx.Done())
 		crdFactory.Start(ctx.Done())
+		k8sFactory.Start(ctx.Done())
 
 		go endpointController.Run(opts.WorkerNumber, ctx.Done())
 		go policyController.Run(opts.WorkerNumber, ctx.Done())
 		go globalController.Run(opts.WorkerNumber, ctx.Done())
+		go elfController.Run(ctx)
 
 		<-ctx.Done()
 		return nil

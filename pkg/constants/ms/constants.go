@@ -26,6 +26,8 @@ const (
 	// globalRule
 	GlobalRuleFirstDelayTime = 20 * time.Second
 	GlobalRuleDelayTimeout   = 5 * time.Minute
+
+	ELFConfigmapName = "everoute-cluster-elf"
 )
 
 const (
