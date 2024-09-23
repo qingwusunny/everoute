@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	groupv1alpha1 "github.com/everoute/everoute/pkg/apis/group/v1alpha1"
+	podv1alpha1 "github.com/everoute/everoute/pkg/apis/pod/v1alpha1"
 	securityv1alpha1 "github.com/everoute/everoute/pkg/apis/security/v1alpha1"
 	"github.com/everoute/everoute/pkg/constants"
 	ctrltypes "github.com/everoute/everoute/pkg/controller/types"
@@ -88,6 +89,11 @@ func NewCRDValidate(client client.Client, scheme *runtime.Scheme) *CRDValidate {
 		Kind:    "GlobalPolicy",
 	}, &globalPolicyValidator{v.client})
 
+	v.register(metav1.GroupVersionKind{
+		Group:   "pod.everoute.io",
+		Version: "v1alpha1",
+		Kind:    "K8sCluster",
+	}, &k8sclusterValidator{v.client})
 	return v
 }
 
@@ -590,5 +596,52 @@ func validateIPBlock(ipBlock networkingv1.IPBlock) error {
 		}
 	}
 
+	return nil
+}
+
+type k8sclusterValidator resourceValidator
+
+func (k *k8sclusterValidator) createValidate(curObj runtime.Object, userInfo authv1.UserInfo) (string, bool) {
+	c := curObj.(*podv1alpha1.K8sCluster)
+	if err := k.validForManagerdBySKS(c); err != nil {
+		return err.Error(), false
+	}
+	return "", true
+}
+func (k *k8sclusterValidator) updateValidate(oldObj, curObj runtime.Object, userInfo authv1.UserInfo) (string, bool) {
+	curC := curObj.(*podv1alpha1.K8sCluster)
+	if err := k.validForManagerdBySKS(curC); err != nil {
+		return err.Error(), false
+	}
+	oldC := oldObj.(*podv1alpha1.K8sCluster)
+	if curC.Spec.CNI != oldC.Spec.CNI {
+		if oldC.Spec.CNI != "" {
+			return "can't change k8scluster spec.cni", false
+		}
+	}
+
+	if curC.Spec.ControlPlaneAvailable != oldC.Spec.ControlPlaneAvailable {
+		if !curC.Spec.ControlPlaneAvailable {
+			return "can't change k8scluster spec.controlPlaneAvailable from true to false", false
+		}
+	}
+	return "", true
+}
+
+func (k *k8sclusterValidator) deleteValidate(oldObj runtime.Object, userInfo authv1.UserInfo) (string, bool) {
+	return "", true
+}
+
+func (k *k8sclusterValidator) validForManagerdBySKS(obj *podv1alpha1.K8sCluster) error {
+	if obj.Spec.ManagedBy != podv1alpha1.SKSPlatForm {
+		if obj.Spec.SksOption != nil {
+			return fmt.Errorf("can't set spec.sksOption for k8cluster doesn't managed by sks")
+		}
+		return nil
+	}
+
+	if obj.Spec.SksOption == nil {
+		return fmt.Errorf("must set spec.sksOption for k8scluster managed by sks")
+	}
 	return nil
 }
