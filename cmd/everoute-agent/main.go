@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	klog "k8s.io/klog/v2"
 	"k8s.io/klog/v2/klogr"
+	_ "net/http/pprof"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
