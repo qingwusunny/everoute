@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	klog "k8s.io/klog/v2"
 	"k8s.io/klog/v2/klogr"
+	_ "net/http/pprof"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -142,6 +144,8 @@ func main() {
 
 	rpcServer := rpcserver.Initialize(datapathManager, mgr.GetClient(), opts.IsEnableCNI(), proxyCache)
 	go rpcServer.Run(stopCtx.Done())
+
+	go http.ListenAndServe("0.0.0.0:22123", nil)
 
 	resourceInit(stopCtx, mgr, datapathManager)
 
