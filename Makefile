@@ -6,7 +6,7 @@ bin: controller agent cni erctl
 images: image image-generate
 
 image-debug:
-	docker buildx build -f build/images/release/Dockerfile -t registry.smtx.io/everoute/debug:old . --push
+	docker buildx build -f build/images/release/Dockerfile -t registry.smtx.io/everoute/debug:mem8 . --push
 
 image:
 	docker buildx build -f build/images/release/Dockerfile -t everoute/release . --load
